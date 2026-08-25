@@ -54,17 +54,31 @@ dimension of a 35mm frame always corresponds to the long side of the image.
 
 They are not the same, and conflating them was a real bug here.
 
-**Head-on equivalent** — what you'd measure sitting perpendicular to the screen
-center, `2·atan(W_real / 2D)`. For a fronto-parallel plane the magnification is
-uniform, so `W_real/D == w_px/f_px` and it needs no real-world scale:
+**Head-on equivalent** — take this seat's distance from the screen centre and
+slide it round onto the centreline: what would it read there?
+
+```
+θ = 2·atan(W_real / 2D)          D = distance to the screen centre
+```
+
+This strips out two separate distortions at once — where you happened to aim
+the camera, and how far off the screen's centreline you're sitting. It is what
+SMPTE EG-18 and THX define their targets against, so it is the primary readout
+and the one plotted on the meter.
+
+For a fronto-parallel screen the magnification is uniform, so `W_real/D` is
+just `w_px/f_px` and no real-world scale is needed:
 
 ```
 θ = 2·atan(w_px / 2·f_px)
 ```
 
-Independent of where the screen lands in the frame. This is what SMPTE EG-18
-and THX define their targets against, so it is the primary readout and the one
-plotted on the meter.
+Note **distance to the screen centre**, not perpendicular distance to the
+screen plane. Sliding sideways along an arc of constant radius keeps you the
+same distance from the screen while bringing you closer to the plane its
+surface lies in; dividing by the perpendicular distance would make the number
+climb as you moved sideways, which is nonsense. The two agree on the
+centreline, which is why the distinction stayed invisible until keystone.
 
 **As-seen** — the true angle between the edge rays from where you actually sat:
 
@@ -100,10 +114,11 @@ axis and overreads otherwise — 4% at 600 px off center.
 | Source | Magnitude | Mitigation |
 |---|---|---|
 | EXIF `f₃₅` is a rounded nominal value | 1–2% | Self-calibrate (below) |
+| Missing `f₃₅` | unbounded | *No reading is given* — angles scale directly with it, so a guess would be a confident wrong answer |
 | Silent digital zoom crop | up to 100% | Flagged from EXIF when tagged; don't pinch-zoom |
 | Residual barrel distortion, ultrawide | ~1% off-axis | Keep target near center |
-| Off-axis seat (keystone) | small, cosine-ish | Sit near centerline |
-| Camera roll | *corrected* — fitted, not assumed away | — |
+| Off-centreline seat (keystone) | 13% on aspect at 20° | *corrected* — rectified, not assumed away |
+| Camera roll | 8% on vertical at 2° | *corrected* — fitted, not assumed away |
 | Focus-distance breathing | negligible at 20 m | — |
 
 **Self-calibration** gets you under 1%: photograph a known length at a
@@ -123,10 +138,16 @@ with resolution, so both belong in the key.
 4. Iterative flood fill (4-connected) over the above-threshold mask; keep the
    largest component.
 5. Collect that component's boundary pixels and fit a **minimum-area rectangle**
-   by rotating calipers over their convex hull. Scale back to native resolution.
+   by rotating calipers over their convex hull.
+6. Refine that rectangle into a **quadrilateral**: assign each boundary point to
+   its nearest side, fit a total-least-squares line per side, intersect adjacent
+   pairs. A keystoned screen still has straight edges — only the rectangle
+   assumption fails, not the straightness one. Declines and keeps the rectangle
+   whenever the result isn't clearly better.
+7. Scale back to native resolution.
 
 In a dark auditorium the lit rectangle separates cleanly and this lands first
-try. Eight resize handles plus a rotation handle for when it doesn't.
+try. Four corner handles and four edge-midpoint handles for when it doesn't.
 
 ### Why a rotated rectangle
 
@@ -148,6 +169,34 @@ testing every hull edge is exhaustive rather than a search. Because `w` and `h`
 then measure along the screen's own axes, every reported angle is roll-corrected
 without any new trigonometry.
 
+### Keystone
+
+Everything above assumes the screen is fronto-parallel. Sit off the centreline
+and that breaks: the near edge images larger than the far one, the aspect ratio
+comes out wrong, and the distance is wrong with it.
+
+With `f_px` known and four corners marked, the fix is exact and closed form.
+Two vanishing points give the 3D directions of the screen's edges; their cross
+product is the plane normal; back-projecting each corner ray onto that plane
+recovers the rectangle up to one overall scale — which is all the angles need,
+since they depend only on ratios.
+
+Measured cost of ignoring it:
+
+| Off centreline | Aspect ratio | Distance |
+|---|---|---|
+| 10° | −5.4% | +1.4% |
+| 20° | −13.0% | +5.7% |
+| 30° | −22.5% | +13.9% |
+| 40° | −33.4% | +27.6% |
+
+A rectangle's two edge directions must be perpendicular, and how far off they
+land is reported as **skew**. It rises if the corners are misplaced *or* if
+`f₃₅` is wrong, and cannot distinguish those — so it says both. It has one
+blind spot worth knowing: under pure yaw, with one pair of edges still parallel
+in the image, symmetry pins the skew to zero for any focal length. It only
+bites when both pairs converge.
+
 **It detects the projected image, not the physical screen.** With masking closed
 on a scope feature you'll read 2.39:1 — which is the honest answer for what
 you're actually watching. The nearest-standard-ratio readout is a useful sanity
@@ -161,7 +210,8 @@ Four files, no build step, no dependencies.
 
 ```
 geom.js      pure geometry -- pinhole model, rotated rect, convex hull,
-             rotating calipers. No DOM, no state, fully tested.
+             rotating calipers, single-view rectification. No DOM, no
+             state, fully tested.
 exif.js      JPEG APP1 -> TIFF -> IFD0 -> Exif sub-IFD. Pure, fully tested.
 index.html   design tokens, markup, and one IIFE of glue: detection,
              canvas rendering, handle editing, the calibration store.
@@ -177,7 +227,7 @@ overlay composited on top. CSS handles display scaling, so every coordinate in
 the code stays in image pixels — conversion happens only at the pointer
 boundary in `toImg()`.
 
-State is a handful of module-level globals (`img`, `W`, `H`, `f35`, `rect`).
+State is a handful of module-level globals (`img`, `W`, `H`, `f35`, `quad`).
 
 ### Tests
 
@@ -268,18 +318,14 @@ To regenerate icons after editing the glyph: `python3 tools/make-icons.py`.
 - No lens-distortion model. Fine for the main camera, degrades on ultrawide.
 - Assumes optical center at image center. True enough for phones.
 - Single frame only. No averaging across a burst.
-- **Keystone is uncorrected.** An off-centerline seat breaks the
-  fronto-parallel assumption that both the head-on subtense and the distance
-  calculation rest on.
+- Optical centre assumed at the image centre. True to well under a pixel of
+  consequence on phones, but an assumption rather than a measurement.
+- `skew` is blind to focal-length error under pure yaw (see Keystone above).
 
 ---
 
 ## Next steps
 
-- [ ] Handle the off-axis case properly — with `f_px` known and a free quad,
-      single-view rectangle rectification has a closed form that recovers both
-      the plane orientation and the true aspect ratio. This subsumes the
-      keystone limitation above and is the last real approximation left.
 - [ ] Recognize known device models from EXIF `Make`/`Model` and ship a
       calibration table, so the first shot on a common phone is already
       sub-1% without a manual calibration pass.

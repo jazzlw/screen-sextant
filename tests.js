@@ -193,6 +193,218 @@ t("nearestAR snaps within 5% and abstains outside it", () => {
   return "abstains rather than guessing";
 });
 
+/* ------------------------------- keystone --------------------------------- */
+/* Build a synthetic off-centerline shot: place a real rectangle in 3D, rotate
+   it away from fronto-parallel, project it, and check rectify() recovers the
+   dimensions and geometry we started with. */
+function project3(p, W, H, f){
+  return [W/2 + p[0]*f/p[2], H/2 + p[1]*f/p[2]];
+}
+/* A screen `wide` x `tall` whose centre sits at distance `dist` along the
+   camera axis, yawed by `yaw` and pitched by `pitch` about its own centre.
+   yaw = 0 is fronto-parallel. */
+function stageScreen(wide, tall, dist, yaw, pitch){
+  const cy=Math.cos(yaw), sy=Math.sin(yaw);
+  const cp=Math.cos(pitch), sp=Math.sin(pitch);
+  // screen-local corners, TL TR BR BL, in a plane with +x right and +y down
+  const local=[[-wide/2,-tall/2],[wide/2,-tall/2],[wide/2,tall/2],[-wide/2,tall/2]];
+  return local.map(([u,v])=>{
+    // yaw about the screen's vertical axis, then pitch about its horizontal one
+    let x = u*cy,        y = v,        z = -u*sy;
+    const y2 = y*cp - z*sp, z2 = y*sp + z*cp;
+    return [x, y2, z2 + dist];
+  });
+}
+const RSET = {W:4032, H:3024, f35:26};
+const RF = RSET.W*RSET.f35/36;
+
+t("rectify() reproduces the fronto-parallel answer exactly", () => {
+  const pts3 = stageScreen(45, 45/2.39, 96, 0, 0);
+  const quad = pts3.map(p => project3(p, RSET.W, RSET.H, RF));
+  const rec = SA.rectify(quad, RSET.W, RSET.H, RSET.f35);
+  ok(rec.ok, "rectify failed: " + rec.reason);
+  const flat = SA.measure(SA.minAreaRect(quad), RSET.W, RSET.H, RSET.f35);
+  near(rec.h, flat.h, 1e-6, "horizontal vs the rect path");
+  near(rec.ar, 2.39, 1e-6, "aspect");
+  near(rec.obliquity, 0, 1e-6, "obliquity");
+  near(rec.skew, 0, 1e-6, "skew");
+  near(SA.perpDistance(45, rec), 96, 1e-6, "distance");
+  return "the general path degenerates to the simple one, to 1e-6";
+});
+
+t("rectify() recovers aspect and distance from an off-centerline seat", () => {
+  const out=[];
+  for(const yawDeg of [5, 15, 25, 35]){
+    const pts3 = stageScreen(45, 45/2.39, 96, yawDeg*Math.PI/180, 0);
+    const quad = pts3.map(p => project3(p, RSET.W, RSET.H, RF));
+    const rec = SA.rectify(quad, RSET.W, RSET.H, RSET.f35);
+    ok(rec.ok, "rectify failed at " + yawDeg + "deg: " + rec.reason);
+    near(rec.ar, 2.39, 1e-6, "aspect at " + yawDeg + "deg");
+    near(rec.obliquity, yawDeg, 1e-6, "obliquity at " + yawDeg + "deg");
+    // yawing about the screen's own centre keeps the line-of-sight distance
+    // at 96 while the perpendicular distance to the plane shrinks by cos(yaw)
+    near(SA.perpDistance(45, rec), 96*Math.cos(yawDeg*Math.PI/180), 1e-6,
+         "perpendicular distance at " + yawDeg + "deg");
+    near(SA.centerDistance(45, rec), 96, 1e-6, "line-of-sight at " + yawDeg + "deg");
+    near(rec.h, 2*Math.atan(45/192)*180/Math.PI, 1e-6, "head-on at " + yawDeg + "deg");
+    out.push(yawDeg + "deg ok");
+  }
+  return out.join("  ") + "  (aspect, obliquity, distance and subtense all exact)";
+});
+
+t("rectify() handles yaw and pitch together", () => {
+  const pts3 = stageScreen(45, 45/2.39, 96, 22*Math.PI/180, -9*Math.PI/180);
+  const quad = pts3.map(p => project3(p, RSET.W, RSET.H, RF));
+  const rec = SA.rectify(quad, RSET.W, RSET.H, RSET.f35);
+  ok(rec.ok, "rectify failed: " + rec.reason);
+  near(rec.ar, 2.39, 1e-6, "aspect");
+  near(SA.perpDistance(45, rec), 96*Math.cos(22*Math.PI/180)*Math.cos(9*Math.PI/180), 1e-6,
+       "perpendicular distance");
+  near(SA.centerDistance(45, rec), 96, 1e-6, "line-of-sight");
+  // combined obliquity is larger than either angle alone
+  ok(rec.obliquity > 22 && rec.obliquity < 26, "obliquity was " + fmt(rec.obliquity));
+  return "yaw 22 + pitch -9 -> obliquity " + fmt(rec.obliquity) + "deg, aspect still 2.39";
+});
+
+t("keystone is exactly the error the old fronto-parallel path made", () => {
+  // The same shot read both ways: this is the size of the bug being fixed.
+  const rows=[];
+  for(const yawDeg of [10, 20, 30, 40]){
+    const pts3 = stageScreen(45, 45/2.39, 96, yawDeg*Math.PI/180, 0);
+    const quad = pts3.map(p => project3(p, RSET.W, RSET.H, RF));
+    const rec = SA.rectify(quad, RSET.W, RSET.H, RSET.f35);
+    const naive = SA.measure(SA.minAreaRect(quad), RSET.W, RSET.H, RSET.f35);
+    const arErr = (naive.ar/rec.ar - 1)*100;
+    const dErr  = (SA.distance(45, SA.minAreaRect(quad).w, naive.f)/96 - 1)*100;
+    ok(Math.abs(arErr) > 0.5, "expected a real aspect error at " + yawDeg + "deg");
+    rows.push(yawDeg+"deg: ar "+fmt(arErr)+"%, dist "+fmt(dErr)+"%");
+  }
+  return rows.join("   ");
+});
+
+t("rectify() reports skew when the focal length is wrong", () => {
+  // Marking a true rectangle with a bad f35 breaks the perpendicularity the
+  // rectification assumes -- which is exactly what `skew` is there to surface.
+  // Needs pitch as well as yaw: under pure yaw the vertical edges stay
+  // parallel in the image and symmetry pins the skew to zero for any f.
+  const pts3 = stageScreen(45, 45/2.39, 96, 25*Math.PI/180, 14*Math.PI/180);
+  const quad = pts3.map(p => project3(p, RSET.W, RSET.H, RF));
+  const truth = SA.rectify(quad, RSET.W, RSET.H, RSET.f35);
+  near(truth.skew, 0, 1e-6, "correct f35 should be square");
+  const seen=[];
+  for(const bad of [20, 33]){
+    const r = SA.rectify(quad, RSET.W, RSET.H, bad);
+    ok(Math.abs(r.skew) > 1, "f35=" + bad + " should show skew, got " + fmt(r.skew));
+    seen.push(bad+"mm -> "+fmt(r.skew)+"deg");
+  }
+  return "correct f35 -> 0.000deg;  " + seen.join(", ");
+});
+
+t("rectify() refuses a crossed or degenerate quad instead of guessing", () => {
+  const good = stageScreen(45,45/2.39,96,0,0).map(p=>project3(p,RSET.W,RSET.H,RF));
+  const cases = {
+    "bowtie":        [good[0], good[1], good[3], good[2]],
+    "collapsed":     [good[0], good[0], good[0], good[0]],
+    "three corners": good.slice(0,3),
+    "null":          null,
+  };
+  for(const name in cases){
+    const r = SA.rectify(cases[name], RSET.W, RSET.H, RSET.f35);
+    ok(r && r.ok === false && r.reason, name + " should be rejected, got " + JSON.stringify(r));
+  }
+  return Object.keys(cases).length + " bad shapes rejected with a reason";
+});
+
+t("isConvexQuad accepts rectangles and rejects bowties", () => {
+  ok(SA.isConvexQuad([[0,0],[10,0],[10,5],[0,5]]), "axis-aligned rectangle");
+  ok(SA.isConvexQuad([[0,0],[10,1],[9,6],[1,5]]), "a keystoned quad");
+  ok(!SA.isConvexQuad([[0,0],[10,0],[0,5],[10,5]]), "bowtie");
+  ok(!SA.isConvexQuad([[0,0],[1,0],[2,0],[3,0]]), "collinear");
+  ok(!SA.isConvexQuad([[0,0],[1,1]]), "too few points");
+  return "winding checked all the way round";
+});
+
+t("centerDistance exceeds perpendicular distance off the centerline", () => {
+  const flat = SA.rectify(stageScreen(45,45/2.39,96,0,0).map(p=>project3(p,RSET.W,RSET.H,RF)),
+                          RSET.W, RSET.H, RSET.f35);
+  near(SA.centerDistance(45, flat), SA.perpDistance(45, flat), 1e-6,
+       "on the centerline the two agree");
+  const out=[];
+  for(const yawDeg of [20, 40]){
+    const rec = SA.rectify(stageScreen(45,45/2.39,96,yawDeg*Math.PI/180,0)
+                             .map(p=>project3(p,RSET.W,RSET.H,RF)),
+                           RSET.W, RSET.H, RSET.f35);
+    const perp = SA.perpDistance(45, rec), ctr = SA.centerDistance(45, rec);
+    ok(ctr > perp, "center distance should exceed perpendicular at " + yawDeg + "deg");
+    out.push(yawDeg+"deg: perp "+fmt(perp)+" vs line-of-sight "+fmt(ctr));
+  }
+  return out.join("   ");
+});
+
+/* ---------------------- quad refinement from a rect fit ------------------- */
+t("refineQuad recovers a keystoned quad from its boundary points", () => {
+  const out=[];
+  for(const yawDeg of [12, 24]){
+    const quad = stageScreen(45,45/2.39,96,yawDeg*Math.PI/180,0)
+                   .map(p=>project3(p,RSET.W,RSET.H,RF));
+    // sample the quad's outline the way detect() collects boundary pixels
+    const pts=[];
+    for(let e=0;e<4;e++){
+      const a=quad[e], b=quad[(e+1)%4];
+      for(let i=0;i<=140;i++){
+        const s=i/140;
+        pts.push([a[0]+(b[0]-a[0])*s, a[1]+(b[1]-a[1])*s]);
+      }
+    }
+    const r = SA.minAreaRect(pts);
+    const got = SA.refineQuad(pts, r);
+    ok(got, "refineQuad returned null at " + yawDeg + "deg");
+    let worst=0;
+    for(let i=0;i<4;i++)
+      worst=Math.max(worst, Math.hypot(got[i][0]-quad[i][0], got[i][1]-quad[i][1]));
+    ok(worst < 2, "worst corner error " + fmt(worst) + "px at " + yawDeg + "deg");
+    const rec = SA.rectify(got, RSET.W, RSET.H, RSET.f35);
+    near(rec.ar, 2.39, 0.01, "aspect via refined quad at " + yawDeg + "deg");
+    out.push(yawDeg+"deg: worst corner "+fmt(worst)+"px, ar "+fmt(rec.ar));
+  }
+  return out.join("   ");
+});
+
+t("refineQuad declines rather than returning a worse fit", () => {
+  ok(SA.refineQuad([], null) === null, "no rect");
+  ok(SA.refineQuad([[0,0]], {cx:0,cy:0,w:10,h:10,t:0}) === null, "too few points");
+  // scattered noise should not produce four confident edges near the rect
+  const noise=[];
+  for(let i=0;i<400;i++) noise.push([(i*37)%500, (i*91)%300]);
+  const r = SA.minAreaRect(noise);
+  const got = SA.refineQuad(noise, r);
+  ok(got === null || SA.isConvexQuad(got), "returned a non-convex quad from noise");
+  return "null on thin or implausible input, so detect() keeps the rect";
+});
+
+t("fitLine finds the principal axis, including near-vertical", () => {
+  const vert=[];
+  for(let i=0;i<40;i++) vert.push([100 + (i%2?0.01:-0.01), i*3]);
+  const lv = SA.fitLine(vert);
+  ok(Math.abs(lv.dx) < 0.01, "vertical line direction was " + fmt(lv.dx));
+  const diag=[];
+  for(let i=0;i<40;i++) diag.push([i, i]);
+  const ld = SA.fitLine(diag);
+  ok(Math.abs(Math.abs(ld.dx)-Math.abs(ld.dy)) < 1e-6, "45 degree line");
+  ok(SA.fitLine([[0,0],[1,1]]) === null, "too few points");
+  return "ordinary least squares would have blown up on the vertical case";
+});
+
+t("intersectLines meets crossing lines and rejects parallel ones", () => {
+  const a = {px:0, py:0, dx:1, dy:0};
+  const b = {px:5, py:-3, dx:0, dy:1};
+  const p = SA.intersectLines(a,b);
+  near(p[0], 5, 1e-9, "x"); near(p[1], 0, 1e-9, "y");
+  ok(SA.intersectLines(a, {px:0, py:9, dx:1, dy:0}) === null, "parallel");
+  ok(SA.intersectLines(a, null) === null, "missing line");
+  return "meets at (5, 0), declines parallel";
+});
+
 /* --------------------------- rotated rect fitting ------------------------- */
 /* Sample the outline of a rectangle rolled by `phi`, the way detect() sees a
    connected component's boundary. */
@@ -513,9 +725,19 @@ t("deviceKey separates resolutions of the same camera", () => {
 });
 
 /* ------------------------- known limitations ------------------------------ */
-known("keystone from an off-centerline seat is uncorrected", () =>
-  "a non-fronto-parallel screen breaks the uniform-magnification assumption " +
-  "that head-on subtense and distance() both rest on");
+known("no lens-distortion model", () =>
+  "the pinhole model assumes straight lines stay straight. True enough for a " +
+  "phone's main camera after the built-in correction, ~1% off-axis on an " +
+  "ultrawide. A screen near the frame edge on an ultrawide is the worst case.");
+
+known("skew cannot detect a wrong focal length under pure yaw", () =>
+  "when one pair of screen edges stays parallel in the image, symmetry pins " +
+  "the skew residual to zero for any f35, so the rectangle constraint carries " +
+  "no information about focal length there. It only bites when both pairs converge.");
+
+known("optical centre assumed at the image centre", () =>
+  "true to well under a pixel of consequence on phone cameras, but it is an " +
+  "assumption rather than a measurement");
 
 /* --------------------------------- report --------------------------------- */
 const pass = results.filter(r=>r.state==="pass").length;

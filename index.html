@@ -166,11 +166,13 @@ code{font:600 12px ui-monospace,Menlo,monospace;color:var(--ink)}
 <div id="stage">
   <div class="frame"><canvas id="cv" tabindex="0" role="img"
     aria-label="Photo with an adjustable rectangle around the screen. Use Tab to select a handle and the arrow keys to move it."></canvas></div>
-  <p class="hint" id="editHint">Drag the corners or edge midpoints to correct the fit; the yellow
-    handle above the top edge rotates. Keyboard: focus the image, <code>Tab</code> cycles handles,
-    arrows nudge, <code>Shift</code> for 10&times;.</p>
+  <p class="hint" id="editHint">Drag the corners onto the screen&rsquo;s corners &mdash; put them on the
+    real corners even if the screen looks skewed, that&rsquo;s what gets corrected. Edge midpoints move a
+    whole edge. Keyboard: focus the image, <code>Tab</code> cycles handles, arrows nudge,
+    <code>Shift</code> for 10&times;.</p>
 
   <div class="banner" id="zoomWarn"></div>
+  <div class="banner" id="needF"></div>
 
   <div class="stagebar">
     <button class="ghost" id="newphoto">New photo</button>
@@ -181,11 +183,14 @@ code{font:600 12px ui-monospace,Menlo,monospace;color:var(--ink)}
     <div class="primary">
       <div class="plabel">Horizontal subtense</div>
       <div class="pval" id="hAng" role="status" aria-live="polite">—<span>°</span></div>
-      <p class="pcap">Head-on equivalent — the quantity SMPTE and THX set their targets against,
-        so it is comparable to them regardless of how the shot was framed.</p>
+      <p class="pcap">Head-on equivalent — this seat&rsquo;s distance from the screen, moved round onto
+        the centreline. Strips out both how the shot was framed and how far off-axis you&rsquo;re
+        sitting, so it is comparable to the SMPTE and THX targets and to other rooms.</p>
     </div>
 
     <div class="note" id="framing"></div>
+    <div class="note" id="keystone"></div>
+    <div class="note" id="skew"></div>
 
     <div class="scale">
       <div class="plabel">Where you're sitting</div>
@@ -207,7 +212,7 @@ code{font:600 12px ui-monospace,Menlo,monospace;color:var(--ink)}
       <div class="cell"><div class="k">Aspect</div><div class="v" id="aspect">—</div></div>
       <div class="cell"><div class="k">Throw distance</div><div class="v" id="dist">—</div></div>
       <div class="cell"><div class="k">Roll</div><div class="v" id="roll">—</div></div>
-      <div class="cell"><div class="k">Off axis</div><div class="v" id="offax">—</div></div>
+      <div class="cell"><div class="k">Off centreline</div><div class="v" id="oblq">—</div></div>
     </div>
 
     <div class="controls">
@@ -239,8 +244,9 @@ code{font:600 12px ui-monospace,Menlo,monospace;color:var(--ink)}
 </div>
 
 <footer>
-  <p><strong style="color:var(--ink)">Method.</strong> Rectilinear pinhole model. <code>f_px = max(W,H) × f₃₅ / 36</code>, then <code>θ = 2·atan(w_px / 2·f_px)</code> for the head-on figure and a difference of arctangents for the as-seen one. Arctangents are differenced rather than scaled, so off-axis targets don't inflate. Distance is exact similar triangles, <code>D = W × f_px / w_px</code>. The screen is fitted as a minimum-area rectangle over the lit region's convex hull, so <code>w_px</code> is measured along the screen's own axis rather than the image's.</p>
-  <p><strong style="color:var(--ink)">Error budget.</strong> EXIF reports a rounded nominal focal length, so expect 1–2% — photograph a known length at a laser-ranged distance, back out <code>f_px</code>, type the implied f₃₅ here and save it for the camera. Camera roll is fitted rather than assumed away — the detector returns a rotated rectangle, so a hand-held tilt no longer inflates the reading. Don't pinch-zoom, though: digital crop is silent unless the camera tags it.</p>
+  <p><strong style="color:var(--ink)">Method.</strong> Rectilinear pinhole model. <code>f_px = max(W,H) × f₃₅ / 36</code>, then <code>θ = 2·atan(w_px / 2·f_px)</code> for the head-on figure and a difference of arctangents for the as-seen one. Arctangents are differenced rather than scaled, so off-axis targets don't inflate. Distance is exact similar triangles, <code>D = W × f_px / w_px</code>. The screen is fitted as a minimum-area rectangle over the lit region's convex hull, then refined to a quadrilateral, so <code>w_px</code> is measured along the screen's own axis rather than the image's.</p>
+  <p><strong style="color:var(--ink)">Keystone.</strong> Off the centreline a screen images as a trapezoid, and the fronto-parallel shortcut above stops holding. With <code>f_px</code> known, two vanishing points give the 3D directions of the screen's edges, their cross product gives the plane normal, and back-projecting each corner ray onto that plane recovers the true rectangle up to one overall scale — which is all the angles need. At 20° off the centreline, ignoring this reads the aspect ratio 13% low.</p>
+  <p><strong style="color:var(--ink)">Error budget.</strong> EXIF reports a rounded nominal focal length, so expect 1–2% — photograph a known length at a laser-ranged distance, back out <code>f_px</code>, type the implied f₃₅ here and save it for the camera. Camera roll and keystone are both fitted rather than assumed away, so neither a hand-held tilt nor an off-centreline seat inflates the reading. Don't pinch-zoom, though: digital crop is silent unless the camera tags it. And if the file carries no focal length, nothing is reported until you supply one — every angle scales directly with it.</p>
   <p><strong style="color:var(--ink)">What it detects.</strong> The projected image, not the physical screen. With masking closed on a scope feature you'll get 2.39:1 and that's the honest answer for what you're watching.</p>
   <p><a href="tests.html">Geometry test suite &rarr;</a></p>
 </footer>
@@ -264,12 +270,12 @@ const cv=$("cv"), ctx=cv.getContext("2d");
 const off=document.createElement("canvas"), octx=off.getContext("2d",{willReadFrequently:true});
 
 let img=null, W=0, H=0, f35=null;
-let rect=null;           // {cx,cy,w,h,t} in image pixels; t is roll in radians
+let quad=null;           // [TL,TR,BR,BL] corners in image pixels
+let keystoneAuto=false;  // did the detector refine the rect into a real quad?
 let drag=null;           // index into handles() while pointer-dragging
 let sel=0;               // selected handle for keyboard editing
 let meta=null;           // parsed EXIF
 let devKey=null;
-const ROT=8;             // index of the rotation handle in handles()
 
 const CAL_KEY="screenangle.cal.v1";
 
@@ -332,7 +338,7 @@ function detect(bias){
     if(area>bestArea){bestArea=area;bestId=id;}
     id++;
   }
-  if(bestId<0 || bestArea<40){ rect=defaultRect(); return; }
+  if(bestId<0 || bestArea<40){ quad=defaultQuad(); return; }
 
   /* Fit a rotated rectangle rather than take a bounding box. Only the
      component's boundary is needed -- the hull of the boundary is the hull of
@@ -346,28 +352,38 @@ function detect(bias){
        lab[i-w]!==bestId || lab[i+w]!==bestId) pts.push([x+0.5, y+0.5]);
   }
   const fit=SA.minAreaRect(pts);
-  if(!fit){ rect=defaultRect(); return; }
-  // points are pixel centers, so the fitted extent is one pixel short
-  rect={cx:fit.cx/s, cy:fit.cy/s, w:(fit.w+1)/s, h:(fit.h+1)/s, t:fit.t};
+  if(!fit){ quad=defaultQuad(); return; }
+
+  /* The rect is only the initialisation. A screen shot from off the centreline
+     is a trapezoid, not a rectangle, so refine each side by fitting a line to
+     the boundary points along it. refineQuad returns null when the result is
+     not clearly better, in which case the rect stands. */
+  const refined=SA.refineQuad(pts, fit);
+  const small = refined ||
+    SA.corners({cx:fit.cx, cy:fit.cy, w:fit.w+1, h:fit.h+1, t:fit.t});
+  keystoneAuto = !!refined;
+  quad = small.map(pt => [pt[0]/s, pt[1]/s]);
 }
-function defaultRect(){ return {cx:W/2, cy:H/2, w:W*0.6, h:H*0.4, t:0}; }
+function defaultQuad(){
+  return SA.corners({cx:W/2, cy:H/2, w:W*0.6, h:H*0.4, t:0});
+}
 
 /* ---------------- render --------------------------------------------------- */
 function scale(){ return W/Math.max(1,cv.clientWidth); }   // image px per CSS px
-/* 4 corners (TL,TR,BR,BL), 4 edge midpoints (T,R,B,L), then the rotation
-   handle floating off the top edge. */
+/* 4 corners (TL,TR,BR,BL) then 4 edge midpoints (top,right,bottom,left).
+   No rotation handle any more: on a free quad a single rotation angle is not
+   well defined, and the detector fits roll on its own. Rotate by the corners. */
+const EDGE=[[0,1],[1,2],[3,2],[0,3]];        // top, right, bottom, left
 function handles(){
-  const k=scale();
-  const pad=Math.max(30*k, rect.h*0.10);
-  return SA.corners(rect).concat(SA.edgeMids(rect))
-           .concat([SA.toWorld(rect, 0, -(rect.h/2+pad))]);
+  return quad.concat(EDGE.map(([a,b]) =>
+    [(quad[a][0]+quad[b][0])/2, (quad[a][1]+quad[b][1])/2]));
 }
 function draw(){
   ctx.drawImage(off,0,0);
   const k=scale();
   const lw=Math.max(1.5,2*k);
-  const cs=SA.corners(rect);
-  const quad=()=>{
+  const cs=quad;
+  const path=()=>{
     ctx.moveTo(cs[0][0],cs[0][1]);
     for(let i=1;i<4;i++) ctx.lineTo(cs[i][0],cs[i][1]);
     ctx.closePath();
@@ -378,23 +394,18 @@ function draw(){
   ctx.fillStyle="rgba(10,11,13,.55)";
   ctx.beginPath();
   ctx.rect(0,0,W,H);
-  quad();
+  path();
   ctx.fill("evenodd");
 
   ctx.strokeStyle="#3FA9B4"; ctx.lineWidth=lw;
-  ctx.beginPath(); quad(); ctx.stroke();
+  ctx.beginPath(); path(); ctx.stroke();
 
   const hs=handles();
-  // stalk from the top edge out to the rotation handle
-  ctx.beginPath();
-  ctx.moveTo(hs[4][0],hs[4][1]); ctx.lineTo(hs[ROT][0],hs[ROT][1]);
-  ctx.stroke();
-
   // registration marks at corners + edge midpoints; the keyboard-selected
   // one is ringed so arrow keys have a visible subject
   const r=Math.max(5,7*k);
   hs.forEach(([px,py],i)=>{
-    ctx.fillStyle = i===ROT ? "#C9B233" : "#F0EDE6";
+    ctx.fillStyle = i<4 ? "#F0EDE6" : "#C9C6BF";
     ctx.beginPath(); ctx.arc(px,py,r,0,6.2832); ctx.fill();
     if(i===sel && document.activeElement===cv){
       ctx.strokeStyle="#C9B233"; ctx.lineWidth=Math.max(1.5,2*k);
@@ -412,80 +423,145 @@ function draw(){
 }
 
 function update(){
-  if(!img||!rect) return;
+  if(!img||!quad) return;
   draw();
-  const a=SA.measure(rect,W,H,f35);
 
-  $("hAng").innerHTML=a.h.toFixed(1)+"<span>°</span>";
-  $("vAng").textContent=a.v.toFixed(1)+"°";
-  $("dAng").textContent=a.d.toFixed(1)+"°";
+  /* No focal length means no reading. An assumed 26mm would produce a
+     confident number that happens to be wrong, which is worse than a blank:
+     the whole calculation is proportional to it. */
+  if(!(f35>0)){
+    blankReadout();
+    $("needF").className="banner on";
+    $("needF").innerHTML="<strong>No focal length in this file.</strong> Angles scale directly "+
+      "with it, so nothing is reported until it is known. Enter the 35mm-equivalent focal "+
+      "length below \u2014 it is in your camera app\u2019s spec sheet, and typically 24\u201326\u202fmm "+
+      "for a phone\u2019s main camera.";
+    return;
+  }
+  $("needF").className="banner";
+
+  const a=SA.rectify(quad,W,H,f35);
+  if(!a.ok){
+    blankReadout();
+    $("needF").className="banner on";
+    $("needF").innerHTML="<strong>Can\u2019t read this shape.</strong> "+a.reason+
+      ". Drag the corners back onto the screen.";
+    return;
+  }
+
+  $("hAng").innerHTML=a.h.toFixed(1)+"<span>\u00b0</span>";
+  $("vAng").textContent=a.v.toFixed(1)+"\u00b0";
+  $("dAng").textContent=a.d.toFixed(1)+"\u00b0";
   const std=SA.nearestAR(a.ar);
   $("aspect").innerHTML=a.ar.toFixed(2)+":1"+(std?" <small>"+std+"</small>":"");
 
   // roll is fitted and divided out, so this is a fit-quality readout, not an
   // error term -- but a wild angle means the fit has latched onto the wrong thing
   const roll=Math.abs(a.roll);
-  $("roll").innerHTML=a.roll.toFixed(1)+"°"+
+  $("roll").innerHTML=a.roll.toFixed(1)+"\u00b0"+
     (roll>8?' <small style="color:var(--bar-yellow)">check the fit</small>':
      roll>0.2?' <small>corrected</small>':"");
-  $("offax").innerHTML=a.off.toFixed(1)+"°";
 
-  // distance: exact similar triangles, so framing does not matter here
+  $("oblq").innerHTML=a.obliquity.toFixed(1)+"\u00b0"+
+    (a.obliquity>5?' <small>corrected</small>':"");
+
+  /* Distance is the line-of-sight to the screen centre, which is what pairs
+     with the head-on figure. The perpendicular distance to the screen plane
+     is the smaller number off the centreline, and goes in the keystone note. */
   const unit=$("unit").value, sw=parseFloat($("sw").value);
+  let perp=NaN;
   if(sw>0){
-    const D=SA.distance(sw, rect.w, a.f);
-    $("dist").innerHTML=D.toFixed(1)+" <small>"+unit+"</small>";
-  } else $("dist").textContent="—";
+    perp=SA.perpDistance(sw, a);
+    $("dist").innerHTML=SA.centerDistance(sw, a).toFixed(1)+" <small>"+unit+"</small>";
+  } else $("dist").textContent="\u2014";
 
   // framing divergence: head-on vs what this seat actually saw
   const gap=(1-a.seenH/a.h)*100;
   const fr=$("framing");
   if(gap>=1){
     fr.className="note on"+(gap>=3?" warn":"");
-    fr.innerHTML="The screen sits <b>"+a.off.toFixed(0)+"° off the frame center</b>, so from "+
-      "this exact spot it subtends <b>"+a.seenH.toFixed(1)+"°</b> — "+gap.toFixed(1)+"% less than "+
-      "the head-on figure above."+(gap>=3?" Re-aim at the screen center and reshoot.":"");
+    fr.innerHTML="From this exact spot the screen subtends <b>"+a.seenH.toFixed(1)+"\u00b0</b>, "+
+      gap.toFixed(1)+"% less than the head-on figure above"+
+      (a.obliquity>=3?" \u2014 partly because you are off the screen\u2019s centreline, partly "+
+        "because the shot is <b>"+a.off.toFixed(0)+"\u00b0 off the frame centre</b>."
+       :", because the shot is <b>"+a.off.toFixed(0)+"\u00b0 off the frame centre</b>.")+
+      (gap>=3&&a.obliquity<3?" Re-aim at the screen centre and reshoot.":"");
   } else fr.className="note";
 
-  // meter: 20°–60°
+  // keystone: only worth saying anything once it is doing real work
+  const ks=$("keystone");
+  if(a.obliquity>=5){
+    ks.className="note on";
+    ks.innerHTML="Seat is <b>"+a.obliquity.toFixed(0)+"\u00b0 off the screen\u2019s centreline</b>, so "+
+      "the screen images as a trapezoid. Corrected: the aspect ratio and every angle above "+
+      "are the screen\u2019s true ones, not the foreshortened ones."+
+      (perp>0?" Perpendicular distance to the screen plane is <b>"+perp.toFixed(1)+" "+unit+
+        "</b>, against "+SA.centerDistance(sw,a).toFixed(1)+" "+unit+" line-of-sight.":"");
+  } else ks.className="note";
+
+  /* Skew is the residual on the assumption that the marked shape is a
+     rectangle. It rises if the corners are wrong OR if f35 is wrong, and it
+     cannot tell those apart -- so it says both. */
+  const sk=$("skew");
+  if(Math.abs(a.skew)>=1.5 && a.obliquity>=3){
+    sk.className="note on warn";
+    sk.innerHTML="The marked corners imply edges meeting at <b>"+
+      (90-a.skew).toFixed(1)+"\u00b0</b> rather than 90\u00b0. Either the corners are off the "+
+      "screen, or the focal length is wrong \u2014 this can\u2019t tell which.";
+  } else sk.className="note";
+
+  // meter: 20-60 degrees
   const pos=Math.max(0,Math.min(100,(a.h-20)/40*100));
   const n=$("needle");
   n.style.left="calc("+pos+"% - 1px)";
-  n.querySelector("b").textContent=a.h.toFixed(1)+"°";
+  n.querySelector("b").textContent=a.h.toFixed(1)+"\u00b0";
 
   let msg;
-  if(a.h<28) msg="<strong>Well back.</strong> Under the recommended range — the picture reads small from here.";
+  if(a.h<28) msg="<strong>Well back.</strong> Under the recommended range \u2014 the picture reads small from here.";
   else if(a.h<36) msg="<strong>Conservative.</strong> Comfortable, a touch shy of the SMPTE minimum.";
-  else if(a.h<=45) msg="<strong>In the pocket.</strong> Between the SMPTE and THX targets — this is the reference zone.";
-  else if(a.h<=55) msg="<strong>Front-loaded.</strong> Immersive, but you'll be scanning to track the frame.";
+  else if(a.h<=45) msg="<strong>In the pocket.</strong> Between the SMPTE and THX targets \u2014 this is the reference zone.";
+  else if(a.h<=55) msg="<strong>Front-loaded.</strong> Immersive, but you\u2019ll be scanning to track the frame.";
   else msg="<strong>Very close.</strong> Past comfortable viewing for most people.";
   $("verdict").innerHTML=msg;
 }
 
-/* ---------------- rect editing --------------------------------------------- */
-/* Edits happen in the rect's own frame, so a resize stays square to the screen
-   however the phone was rolled. Handle order matches handles(). */
+function blankReadout(){
+  $("hAng").innerHTML="\u2014<span>\u00b0</span>";
+  for(const id of ["vAng","dAng","aspect","dist","roll","oblq"]) $(id).textContent="\u2014";
+  $("needle").style.left="calc(0% - 1px)";
+  $("needle").querySelector("b").textContent="\u2014";
+  $("verdict").innerHTML="";
+  for(const id of ["framing","keystone","skew"]) $(id).className="note";
+}
+
+/* ---------------- quad editing --------------------------------------------- */
+/* Corners move freely -- that freedom is what lets a keystoned screen be
+   marked at all. Edge midpoints translate the whole edge, which is what you
+   want for the ordinary square-on case where the shape is already right.
+
+   An edit that would cross the quad over itself is rejected rather than
+   clamped: rectify() cannot interpret a bowtie, and silently snapping the
+   corner somewhere else is more confusing than simply not moving. */
 function moveHandle(i,x,y){
-  if(i===ROT){
-    // aim the rect's "up" axis at the pointer
-    const dx=x-rect.cx, dy=y-rect.cy;
-    if(Math.hypot(dx,dy)<1e-6) return;
-    rect=SA.normalizeRect({cx:rect.cx, cy:rect.cy, w:rect.w, h:rect.h,
-                           t:Math.atan2(dx,-dy)});
-    return;
+  const before=quad.map(p=>p.slice());
+  if(i<4){
+    quad[i]=[x,y];
+  } else {
+    const [a,b]=EDGE[i-4];
+    const mx=(quad[a][0]+quad[b][0])/2, my=(quad[a][1]+quad[b][1])/2;
+    const dx=x-mx, dy=y-my;
+    quad[a]=[quad[a][0]+dx, quad[a][1]+dy];
+    quad[b]=[quad[b][0]+dx, quad[b][1]+dy];
   }
-  const MIN=8;
-  const [u,v]=SA.toLocal(rect,x,y);
-  let l=-rect.w/2, r=rect.w/2, tp=-rect.h/2, bt=rect.h/2;
-  if(i===0||i===3||i===7) l=u;                 // TL, BL, left mid
-  if(i===1||i===2||i===5) r=u;                 // TR, BR, right mid
-  if(i===0||i===1||i===4) tp=v;                // TL, TR, top mid
-  if(i===2||i===3||i===6) bt=v;                // BR, BL, bottom mid
-  // keep the rect non-degenerate by pushing the edge that was not dragged
-  if(r-l<MIN){ if(i===0||i===3||i===7) l=r-MIN; else r=l+MIN; }
-  if(bt-tp<MIN){ if(i===0||i===1||i===4) tp=bt-MIN; else bt=tp+MIN; }
-  const [ncx,ncy]=SA.toWorld(rect,(l+r)/2,(tp+bt)/2);   // before w/h change
-  rect.cx=ncx; rect.cy=ncy; rect.w=r-l; rect.h=bt-tp;
+  // reject a self-crossing or collapsed result
+  let area=0;
+  for(let k=0;k<4;k++){
+    const p=quad[k], q=quad[(k+1)%4];
+    area += p[0]*q[1] - q[0]*p[1];
+  }
+  if(!SA.isConvexQuad(quad) || Math.abs(area/2) < 64){
+    for(let k=0;k<4;k++) quad[k]=before[k];
+  }
 }
 function toImg(ev){
   const r=cv.getBoundingClientRect();
@@ -510,7 +586,7 @@ cv.addEventListener("pointermove",e=>{
 /* Keyboard editing: the drag handles are otherwise unreachable without a
    pointer, which also makes the box impossible to fine-tune by one pixel. */
 cv.addEventListener("keydown",e=>{
-  if(!img||!rect) return;
+  if(!img||!quad) return;
   const hs=handles();
   if(e.key==="Tab"){
     // Cycle handles, but let Tab out of the canvas at either end rather than
@@ -563,11 +639,11 @@ function fail(msg){
 }
 
 function setF35(v,kind){
-  f35=v;
-  $("f35").value=Math.round(v*100)/100;
-  const label={exif:"from EXIF",cal:"calibrated",assumed:"assumed — verify",manual:"manual"}[kind];
-  $("f35src").textContent=label;
-  $("f35src").className="flag "+({exif:"ok",cal:"cal",assumed:"warn",manual:""}[kind]);
+  f35 = (v>0) ? v : null;
+  $("f35").value = f35 ? Math.round(f35*100)/100 : "";
+  $("f35src").textContent =
+    {exif:"from EXIF", cal:"calibrated", unknown:"not in file — enter it", manual:"manual"}[kind];
+  $("f35src").className = "flag " + {exif:"ok", cal:"cal", unknown:"warn", manual:""}[kind];
 }
 
 function showCalState(){
@@ -580,7 +656,7 @@ function showCalState(){
     $("forget").onclick=()=>{
       const s=calRead(); delete s[devKey]; calWrite(s);
       showCalState();
-      if(meta && SA_EXIF.plausibleF35(meta.f35)) setF35(meta.f35,"exif"); else setF35(26,"assumed");
+      if(meta && SA_EXIF.plausibleF35(meta.f35)) setF35(meta.f35,"exif"); else setF35(null,"unknown");
       update();
     };
   }
@@ -608,7 +684,7 @@ async function load(file){
   const store=calRead();
   if(store[devKey]!=null)                    setF35(store[devKey],"cal");
   else if(SA_EXIF.plausibleF35(meta.f35))    setF35(meta.f35,"exif");
-  else                                       setF35(26,"assumed");
+  else                                       setF35(null,"unknown");
   showCalState();
 
   // digital zoom is the one error big enough to invalidate the reading outright
@@ -664,7 +740,7 @@ $("file").onchange=e=>{
 $("intake").addEventListener("drop",e=>{ const f=e.dataTransfer.files[0]; if(f) load(f); });
 
 $("newphoto").onclick=()=>{
-  img=null; rect=null; meta=null; devKey=null;
+  img=null; quad=null; meta=null; devKey=null;
   $("stage").style.display="none";
   $("intake").style.display="block";
   $("zoomWarn").className="banner";
@@ -674,10 +750,13 @@ $("newphoto").onclick=()=>{
 
 $("f35").oninput=e=>{
   const v=parseFloat(e.target.value);
-  if(v>0){ f35=v; $("f35src").textContent="manual"; $("f35src").className="flag"; update(); }
+  f35 = v>0 ? v : null;
+  $("f35src").textContent = f35 ? "manual" : "not in file — enter it";
+  $("f35src").className = "flag" + (f35 ? "" : " warn");
+  update();
 };
 $("calib").onclick=()=>{
-  if(!img||!devKey) return;
+  if(!img||!devKey||!(f35>0)) return;
   const s=calRead();
   s[devKey]=Math.round(f35*100)/100;
   if(calWrite(s)){ setF35(s[devKey],"cal"); showCalState(); }

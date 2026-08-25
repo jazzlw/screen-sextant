@@ -80,8 +80,8 @@ const FOUND = HTML.match(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g);
 if(!FOUND) throw new Error("no inline <script> found in index.html");
 const INLINE = FOUND[FOUND.length-1].replace(/^<script[^>]*>/, "").replace(/<\/script>$/, "");
 const HOOKS = `
-window.__t={update,handles,moveHandle,setF35,showCalState,calRead,calWrite,detect,defaultRect,
-  getRect:()=>rect, setRect:r=>{rect=r;}, setImg:i=>{img=i;}, setF:v=>{f35=v;},
+window.__t={update,handles,moveHandle,setF35,showCalState,calRead,calWrite,detect,defaultQuad,
+  getQuad:()=>quad, setQuad:q=>{quad=q;}, setImg:i=>{img=i;}, setF:v=>{f35=v;},
   setDims:(w,h)=>{W=w;H=h;}, setMeta:(m,k)=>{meta=m;devKey=k;}};
 `;
 if(!/\}\)\(\);\s*$/.test(INLINE))
@@ -98,14 +98,25 @@ function check(name, fn){
 function ok(c,m){ if(!c) throw new Error(m || "assertion failed"); }
 
 const W = 4032, H = 3024, F = W*26/36;
-// a 2.39:1 screen 45ft wide at 96ft, centered
-const half = 22.5*F/96, halfV = (22.5/2.39)*F/96;
-const centered = {cx:W/2, cy:H/2, w:2*half, h:2*halfV, t:0};
+
+/* A 2.39:1 screen 45ft wide, whose centre sits `dist` along the camera axis,
+   yawed by `yaw` about its own vertical axis. yaw 0 is square-on. */
+function stage(dist, yaw, dx, dy){
+  const wide = 45, tall = 45/2.39;
+  const cy = Math.cos(yaw||0), sy = Math.sin(yaw||0);
+  return [[-wide/2,-tall/2],[wide/2,-tall/2],[wide/2,tall/2],[-wide/2,tall/2]]
+    .map(([u,v]) => {
+      const x = u*cy, y = v, z = -u*sy + dist;
+      return [W/2 + x*F/z + (dx||0), H/2 + y*F/z + (dy||0)];
+    });
+}
+const SQUARE = stage(96, 0);
+const clone = q => q.map(p => p.slice());
 
 t.setDims(W,H); t.setImg({}); t.setF(26);
 
 check("update() runs and fills the primary readout", () => {
-  t.setRect({...centered});
+  t.setQuad(clone(SQUARE));
   $("unit").value = "ft"; $("sw").value = "";
   t.update();
   ok(/^26\.\d<span>/.test($("hAng").innerHTML), "hAng was " + $("hAng").innerHTML);
@@ -117,7 +128,7 @@ check("update() runs and fills the primary readout", () => {
 });
 
 check("distance appears once a screen width is entered, in the chosen unit", () => {
-  t.setRect({...centered});
+  t.setQuad(clone(SQUARE));
   $("sw").value = "45"; $("unit").value = "ft";
   t.update();
   ok($("dist").innerHTML.indexOf("96.0") === 0, "expected 96.0 ft, got " + $("dist").innerHTML);
@@ -125,49 +136,108 @@ check("distance appears once a screen width is entered, in the chosen unit", () 
   $("sw").value = String(45*0.3048); $("unit").value = "m";
   t.update();
   ok($("dist").innerHTML.indexOf("29.3") === 0, "expected 29.3 m, got " + $("dist").innerHTML);
-  return ft.replace(/<[^>]+>/g," ") + "  ->  " + $("dist").innerHTML.replace(/<[^>]+>/g," ");
+  $("sw").value = "45"; $("unit").value = "ft";
+  return ft.replace(/<[^>]+>/g," ") + "  ->  29.3 m";
 });
 
-check("framing note stays hidden when the screen is centered", () => {
-  t.setRect({...centered});
+check("an unknown focal length blanks the readout instead of assuming one", () => {
+  t.setQuad(clone(SQUARE));
+  t.setF(null);
+  t.update();
+  ok($("hAng").innerHTML.indexOf("—") === 0, "hAng was " + $("hAng").innerHTML);
+  ok($("vAng").textContent === "—", "vAng was " + $("vAng").textContent);
+  ok($("dist").textContent === "—", "dist was " + $("dist").textContent);
+  ok($("needF").className.indexOf("on") >= 0, "the prompt should be visible");
+  ok($("needF").innerHTML.indexOf("No focal length") >= 0, "needF: " + $("needF").innerHTML);
+  ok($("verdict").innerHTML === "", "no verdict without a reading");
+  t.setF(26); t.update();
+  ok($("needF").className.indexOf("on") < 0, "the prompt should clear once f35 is known");
+  ok($("hAng").innerHTML.indexOf("26") === 0, "reading should come back");
+  return "blank + prompt, then recovers when f35 is supplied";
+});
+
+check("setF35 never invents a focal length", () => {
+  for(const v of [null, 0, -5, NaN, undefined]){
+    t.setF35(v, "unknown");
+    ok($("f35").value === "", "setF35(" + v + ") left value " + JSON.stringify($("f35").value));
+  }
+  t.setF35(24, "exif");
+  ok($("f35").value === 24, "a real value should populate the field");
+  t.setF(26);
+  return "no silent 26mm fallback on any falsy input";
+});
+
+check("framing note stays hidden when the screen is centred", () => {
+  t.setQuad(clone(SQUARE));
   t.update();
   ok($("framing").className === "note", "className was " + $("framing").className);
-  return "no divergence, no note";
+  ok($("keystone").className === "note", "keystone note should be hidden too");
+  return "no divergence, no notes";
 });
 
-check("framing note appears and escalates as the shot drifts off center", () => {
+check("framing note appears and escalates as the shot drifts off centre", () => {
   const seen = [];
-  for(const dx of [400, 900]){
-    t.setRect({...centered, cx:centered.cx+dx});
+  for(const dx of [600, 1000]){
+    t.setQuad(stage(96, 0, dx, 0));
     t.update();
     seen.push(dx + "px -> '" + $("framing").className + "'");
     ok($("framing").className.indexOf("on") >= 0, "note hidden at dx=" + dx);
   }
-  ok($("framing").className.indexOf("warn") >= 0, "should escalate to warn at dx=900");
-  ok($("framing").innerHTML.indexOf("Re-aim") > 0, "warn text should tell the user what to do");
+  ok($("framing").className.indexOf("warn") >= 0, "should escalate to warn at dx=1000");
   return seen.join("   ");
+});
+
+check("keystone note fires only once obliquity is doing real work", () => {
+  const seen = [];
+  for(const [yawDeg, want] of [[0,false],[3,false],[12,true],[30,true]]){
+    t.setQuad(stage(96, yawDeg*Math.PI/180));
+    $("sw").value = "45";
+    t.update();
+    const on = $("keystone").className.indexOf("on") >= 0;
+    ok(on === want, yawDeg + "deg: keystone note " + (on?"shown":"hidden") + ", wanted the opposite");
+    seen.push(yawDeg + "deg:" + (on?"note":"quiet"));
+  }
+  ok($("keystone").innerHTML.indexOf("trapezoid") > 0, "should explain why");
+  ok($("keystone").innerHTML.indexOf("Perpendicular") > 0, "should give the perpendicular distance");
+  return seen.join("  ");
+});
+
+check("keystone correction holds the readout steady as the seat swings off axis", () => {
+  // Same screen, same distance from its centre, viewed from further and
+  // further off the centreline. Every reported figure must hold.
+  const rows = [];
+  let first = null;
+  for(const yawDeg of [0, 10, 20, 30]){
+    t.setQuad(stage(96, yawDeg*Math.PI/180));
+    $("sw").value = "45"; $("unit").value = "ft";
+    t.update();
+    const row = [$("hAng").innerHTML, $("vAng").textContent,
+                 $("aspect").innerHTML, $("dist").innerHTML].join(" | ");
+    if(first === null) first = row;
+    else ok(row === first, yawDeg + "deg drifted:\n          " + first + "\n          " + row);
+    rows.push(yawDeg + "deg:" + $("oblq").innerHTML.replace(/<[^>]+>/g,""));
+  }
+  return "held at " + first.replace(/<[^>]+>/g," ") + "   [" + rows.join(" ") + "]";
 });
 
 check("verdict text tracks the meter zones", () => {
   const zones = [];
-  for(const w of [0.9, 1.22, 1.55, 1.99, 2.37]){
-    const hw = half*w;
-    t.setRect({...centered, w:2*hw});
+  for(const d of [40, 48, 62, 78, 106]){
+    t.setQuad(stage(d, 0));
     t.update();
     const deg = parseFloat($("needle")._child.textContent);
     zones.push(deg.toFixed(0) + "° " + $("verdict").innerHTML.match(/<strong>([^<]+)</)[1]);
   }
-  ok(new Set(zones.map(z=>z.split(" ")[1])).size === 5, "expected 5 distinct verdicts: " + zones);
+  ok(new Set(zones.map(z => z.split(" ")[1])).size === 5, "expected 5 distinct verdicts: " + zones);
   return zones.join("  |  ");
 });
 
 check("needle stays inside the track at both extremes", () => {
-  for(const w of [0.05, 6]){
-    const hw = half*w;
-    t.setRect({...centered, w:2*hw});
+  for(const d of [400, 22]){
+    t.setQuad(stage(d, 0));
     t.update();
     const pos = parseFloat($("needle").style.left.match(/([\d.]+)%/)[1]);
-    ok(pos >= 0 && pos <= 100, "needle at " + pos + "% for scale " + w);
+    ok(pos >= 0 && pos <= 100, "needle at " + pos + "% for distance " + d);
   }
   return "clamped to 0-100%";
 });
@@ -175,8 +245,6 @@ check("needle stays inside the track at both extremes", () => {
 check("calibration round-trips through storage and can be forgotten", () => {
   STORE = {};
   t.setMeta({make:"Apple", model:"iPhone 15 Pro"}, "Apple iPhone 15 Pro@4032");
-  t.setF(26);
-  $("f35").value = "25.4";
   t.calWrite({...t.calRead(), "Apple iPhone 15 Pro@4032": 25.4});
   ok(t.calRead()["Apple iPhone 15 Pro@4032"] === 25.4, "did not persist");
   t.showCalState();
@@ -206,78 +274,68 @@ check("calRead survives corrupt JSON in storage", () => {
 
 check("setF35 labels each provenance distinctly", () => {
   const seen = [];
-  for(const k of ["exif","cal","assumed","manual"]){
-    t.setF35(26, k);
+  for(const k of ["exif","cal","unknown","manual"]){
+    t.setF35(k === "unknown" ? null : 26, k);
     seen.push(k + "='" + $("f35src").textContent + "'");
     ok($("f35src").textContent, "no label for " + k);
   }
+  t.setF(26);
   return seen.join("  ");
 });
 
-check("the 8 resize handles each follow the pointer", () => {
-  for(let i=0;i<8;i++){
-    t.setRect({...centered});
+check("the 4 corner handles each follow the pointer", () => {
+  for(let i=0;i<4;i++){
+    t.setQuad(clone(SQUARE));
     const before = t.handles()[i];
-    t.moveHandle(i, before[0]+40, before[1]+40);
+    // pull each corner outward, away from the centre, so the quad stays convex
+    const cx = W/2, cy = H/2;
+    const nx = before[0] + (before[0]-cx)*0.1, ny = before[1] + (before[1]-cy)*0.1;
+    t.moveHandle(i, nx, ny);
     const after = t.handles()[i];
-    ok(Math.abs(after[0]-(before[0]+40)) < 1e-6 || Math.abs(after[1]-(before[1]+40)) < 1e-6,
-       "handle " + i + " did not follow: " + before + " -> " + after);
+    ok(Math.abs(after[0]-nx) < 1e-6 && Math.abs(after[1]-ny) < 1e-6,
+       "corner " + i + " did not follow: " + before + " -> " + after);
   }
-  return "each handle moves the edges it sits on";
+  return "corners move freely, which is what makes keystone markable";
 });
 
-check("the rotation handle pivots the rect without resizing it", () => {
-  const out = [];
-  for(const deg of [5, -12, 30]){
-    t.setRect({...centered});
-    const rad = deg*Math.PI/180;
-    // put the pointer where the rect's "up" axis should end up pointing
-    const R = 500;
-    t.moveHandle(8, centered.cx + R*Math.sin(rad), centered.cy - R*Math.cos(rad));
-    const r = t.getRect();
-    ok(Math.abs(r.w-centered.w) < 1e-6 && Math.abs(r.h-centered.h) < 1e-6,
-       "rotation resized the rect at " + deg + "deg");
-    ok(Math.abs(r.cx-centered.cx) < 1e-6 && Math.abs(r.cy-centered.cy) < 1e-6,
-       "rotation moved the center at " + deg + "deg");
-    ok(Math.abs(r.t*180/Math.PI - deg) < 1e-6,
-       "wanted " + deg + "deg, got " + (r.t*180/Math.PI));
-    out.push(deg + "deg ok");
+check("edge midpoint handles translate the whole edge", () => {
+  for(let i=4;i<8;i++){
+    t.setQuad(clone(SQUARE));
+    const before = t.handles();
+    t.moveHandle(i, before[i][0]+30, before[i][1]+30);
+    const after = t.handles();
+    ok(Math.abs(after[i][0]-(before[i][0]+30)) < 1e-6 &&
+       Math.abs(after[i][1]-(before[i][1]+30)) < 1e-6,
+       "edge " + i + " midpoint did not follow");
+    // the opposite edge must not have moved
+    const opp = 4 + ((i-4)+2)%4;
+    ok(Math.abs(after[opp][0]-before[opp][0]) < 1e-6 &&
+       Math.abs(after[opp][1]-before[opp][1]) < 1e-6,
+       "moving edge " + i + " dragged the opposite edge with it");
   }
-  return out.join("  ") + "  (size and center preserved)";
+  return "one edge at a time, the far edge pinned";
 });
 
-check("rotating the rect leaves every reported angle unchanged", () => {
-  t.setRect({...centered});
-  $("sw").value = "45"; $("unit").value = "ft";
-  t.update();
-  const flat = [$("hAng").innerHTML, $("vAng").textContent, $("dAng").textContent,
-                $("aspect").innerHTML, $("dist").innerHTML];
-  t.setRect({...centered, t: 7*Math.PI/180});
-  t.update();
-  const rolled = [$("hAng").innerHTML, $("vAng").textContent, $("dAng").textContent,
-                  $("aspect").innerHTML, $("dist").innerHTML];
-  for(let i=0;i<flat.length;i++)
-    ok(flat[i] === rolled[i], "readout " + i + " changed: " + flat[i] + " -> " + rolled[i]);
-  ok($("roll").innerHTML.indexOf("7.0") === 0, "roll cell should read 7.0, got " + $("roll").innerHTML);
-  return "7 degrees of roll: V still " + rolled[1] + ", AR still " +
-         rolled[3].replace(/<[^>]+>/g," ") + ", D still " + rolled[4].replace(/<[^>]+>/g," ");
-});
-
-check("moveHandle() cannot collapse the rect", () => {
-  for(let i=0;i<9;i++){
-    t.setRect({...centered});
-    t.moveHandle(i, W/2, H/2);            // drag every handle to the center
+check("an edit that would cross the quad is rejected, not clamped", () => {
+  for(let i=0;i<4;i++){
+    t.setQuad(clone(SQUARE));
+    const before = JSON.stringify(t.getQuad());
+    t.moveHandle(i, W/2, H/2);            // drag a corner to the centre
     t.moveHandle(i, W/2, H/2);
-    const b = t.getRect();
-    ok(b.w >= 8 - 1e-9 && b.h >= 8 - 1e-9,
-       "handle " + i + " collapsed the rect to " + b.w + "x" + b.h);
-    ok(!Number.isNaN(b.cx+b.cy+b.w+b.h+b.t), "handle " + i + " produced NaN");
+    const q = t.getQuad();
+    ok(SA.isConvexQuad(q), "corner " + i + " produced a bowtie");
+    ok(!q.some(p => Number.isNaN(p[0]) || Number.isNaN(p[1])), "corner " + i + " produced NaN");
   }
-  return "8px floor holds on every handle";
+  // a genuine bowtie attempt leaves the quad untouched
+  t.setQuad(clone(SQUARE));
+  const before = JSON.stringify(t.getQuad());
+  t.moveHandle(0, SQUARE[2][0], SQUARE[2][1]);   // TL onto BR
+  ok(JSON.stringify(t.getQuad()) === before, "a crossing drag should be a no-op");
+  return "convexity held on every corner; crossing drags are no-ops";
 });
 
-check("a degenerate box does not produce NaN in the readout", () => {
-  t.setRect({cx:100, cy:100, w:8, h:8, t:0});
+check("a degenerate shape blanks the readout instead of printing NaN", () => {
+  t.setQuad([[100,100],[104,100],[104,104],[100,104]]);
   t.update();
   ok($("hAng").innerHTML.indexOf("NaN") < 0, "hAng: " + $("hAng").innerHTML);
   ok($("aspect").innerHTML.indexOf("NaN") < 0, "aspect: " + $("aspect").innerHTML);
@@ -292,28 +350,27 @@ check("detect() fits a rolled screen through the whole pipeline", () => {
     // detect() downscales to 520 on the long side: 4032x3024 -> 520x390
     SCENE = rolledScene(260, 195, 300, 300/2.39, p);
     t.detect(0);
-    const r = t.getRect();
-    const ar = r.w/r.h;
-    ok(Math.abs(r.t*180/Math.PI - phi) < 0.4,
-       "roll at " + phi + "deg came back " + (r.t*180/Math.PI).toFixed(2));
-    ok(Math.abs(ar/2.39 - 1) < 0.02,
-       "aspect at " + phi + "deg came back " + ar.toFixed(3));
-    // center maps back to native resolution: 260 / (520/4032)
-    ok(Math.abs(r.cx - 260*4032/520) < 12, "cx at " + phi + "deg was " + r.cx.toFixed(0));
-    out.push(phi + "deg -> " + (r.t*180/Math.PI).toFixed(2) + "deg, " + ar.toFixed(2) + ":1");
+    t.setF(26);
+    t.update();
+    const ar = parseFloat($("aspect").innerHTML);
+    const roll = parseFloat($("roll").innerHTML);
+    ok(Math.abs(roll - phi) < 0.4, "roll at " + phi + "deg came back " + roll);
+    ok(Math.abs(ar/2.39 - 1) < 0.02, "aspect at " + phi + "deg came back " + ar);
+    out.push(phi + "deg -> " + roll.toFixed(2) + "deg, " + ar.toFixed(2) + ":1");
   }
   SCENE = null;
   return out.join("   ");
 });
 
-check("detect() falls back to a default rect on a blank frame", () => {
+check("detect() falls back to a default quad on a blank frame", () => {
   SCENE = (w,h) => new Uint8ClampedArray(w*h*4);   // all black, no component
   t.detect(0);
-  const r = t.getRect();
-  ok(r && r.w > 0 && r.h > 0 && r.t === 0, "expected the default rect, got " + JSON.stringify(r));
-  ok(Math.abs(r.cx - W/2) < 1e-9, "default should be centered");
+  const q = t.getQuad();
+  ok(q && q.length === 4 && SA.isConvexQuad(q), "expected a usable default, got " + JSON.stringify(q));
+  const cx = (q[0][0]+q[1][0]+q[2][0]+q[3][0])/4;
+  ok(Math.abs(cx - W/2) < 1e-6, "default should be centred");
   SCENE = null;
-  return "centered default, " + r.w.toFixed(0) + "x" + r.h.toFixed(0);
+  return "centred default quad";
 });
 
 print("\n" + (fails ? fails + " FAILED" : "all glue checks passed"));
