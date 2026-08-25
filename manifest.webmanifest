@@ -1,6 +1,6 @@
 {
-  "name": "Screen Angle",
-  "short_name": "Screen Angle",
+  "name": "Screen Sextant",
+  "short_name": "Sextant",
   "description": "Measure the angular subtense of a cinema or TV screen from a single phone photo.",
   "start_url": "./",
   "scope": "./",

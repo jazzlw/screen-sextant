@@ -1,4 +1,4 @@
-# screen_angle_size
+# Screen Sextant
 
 Measure the angular subtense of a cinema screen from a single phone photo.
 No tape measure, no rangefinder, no knowing the screen dimensions.
@@ -9,7 +9,7 @@ No tape measure, no rangefinder, no knowing the screen dimensions.
 
 ## Quick start
 
-Open `index.html` in a browser, or use the hosted copy. Photograph the screen
+**[jazzlw.github.io/screen-sextant](https://jazzlw.github.io/screen-sextant/)** — or open `index.html` locally. Photograph the screen
 from your seat, feed it in. The tool finds the lit rectangle and reports how
 wide it sits in your field of view.
 
@@ -247,7 +247,7 @@ it makes iOS transcode HEIC on the way in, so the focal-length tag survives. The
 GitHub Pages, served from the repo root on `main`.
 
 Every path is relative (`./sw.js`, `start_url: "./"`, `scope: "./"`) because a
-project page lives under `/screen_angle_size/`. An absolute `/` would resolve to
+project page lives under `/screen-sextant/`. An absolute `/` would resolve to
 the user root and 404 — and the failure is silent: the install prompt simply
 never appears.
 

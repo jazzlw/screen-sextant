@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Screen Angle — geometry tests</title>
+<title>Screen Sextant — geometry tests</title>
 <style>
 :root{
   --field:#2A2B2E; --panel:#1B1C1F; --panel-2:#232427;
@@ -54,7 +54,7 @@ a{color:var(--bar-cyan)}
 <div class="wrap">
 <header>
   <p class="eyebrow">Geometry test suite</p>
-  <h1>Screen Angle <em>/ tests</em></h1>
+  <h1>Screen Sextant <em>/ tests</em></h1>
   <p class="sub">Synthesize a screen of known size at a known distance, project it through a
   known focal length, and check the tool recovers the inputs. Same assertions as
   <code>./run-tests.sh</code>.</p>
@@ -86,7 +86,7 @@ a{color:var(--bar-cyan)}
   $("known").textContent = s.known;
   $("fail").className = "n " + (s.fail ? "bad" : "good");
   document.title = (s.fail ? "✕ " + s.fail + " failing" : "✓ " + s.pass + " passing")
-                 + " — Screen Angle tests";
+                 + " — Screen Sextant tests";
 
   const list = $("list");
   for(const r of SA_TESTS.results){
