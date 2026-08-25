@@ -193,6 +193,130 @@ t("nearestAR snaps within 5% and abstains outside it", () => {
   return "abstains rather than guessing";
 });
 
+/* --------------------------- rotated rect fitting ------------------------- */
+/* Sample the outline of a rectangle rolled by `phi`, the way detect() sees a
+   connected component's boundary. */
+function rolledOutline(cx,cy,w,h,phi,n){
+  n = n||60;
+  const c=Math.cos(phi), s=Math.sin(phi), pts=[];
+  const at=(u,v)=>pts.push([cx+u*c-v*s, cy+u*s+v*c]);
+  for(let i=0;i<=n;i++){
+    const f=i/n, u=-w/2+w*f, v=-h/2+h*f;
+    at(u,-h/2); at(u,h/2); at(-w/2,v); at(w/2,v);
+  }
+  return pts;
+}
+
+t("convexHull keeps the extreme points and drops interior ones", () => {
+  const pts = [[0,0],[10,0],[10,10],[0,10],[5,5],[3,7],[8,2]];
+  const hull = SA.convexHull(pts);
+  ok(hull.length===4, "expected 4 hull points, got "+hull.length+": "+JSON.stringify(hull));
+  for(const corner of [[0,0],[10,0],[10,10],[0,10]])
+    ok(hull.some(p=>p[0]===corner[0]&&p[1]===corner[1]), "missing corner "+corner);
+  return "4 corners kept, 3 interior points dropped";
+});
+
+t("convexHull survives degenerate inputs", () => {
+  ok(SA.convexHull([]).length===0, "empty");
+  ok(SA.convexHull([[1,1]]).length===1, "single point");
+  ok(SA.convexHull([[1,1],[2,2]]).length===2, "two points");
+  const collinear = SA.convexHull([[0,0],[1,1],[2,2],[3,3]]);
+  ok(collinear.length>=1 && collinear.length<=4, "collinear gave "+collinear.length);
+  return "no crash, no empty hull from non-empty input";
+});
+
+t("minAreaRect recovers a rolled rectangle's true size and angle", () => {
+  const out=[];
+  for(const phi of [0,1,2,3,5,12,-7]){
+    const p = phi*Math.PI/180;
+    const r = SA.minAreaRect(rolledOutline(500,400,239,100,p));
+    near(r.w, 239, 0.6, "width at "+phi+"deg");
+    near(r.h, 100, 0.6, "height at "+phi+"deg");
+    near(SA.deg(r.t), phi, 0.35, "angle at "+phi+"deg");
+    near(r.cx, 500, 0.6, "cx at "+phi+"deg");
+    near(r.cy, 400, 0.6, "cy at "+phi+"deg");
+    out.push(phi+"->"+fmt(SA.deg(r.t)));
+  }
+  return "recovered angles: "+out.join(" ");
+});
+
+t("minAreaRect beats the bounding box exactly where the old code failed", () => {
+  // 2 degrees of roll: the axis-aligned bbox reads 8.3% tall and 2.24:1.
+  const p = 2*Math.PI/180;
+  const pts = rolledOutline(500,400,239,100,p);
+  let x1=Infinity,y1=Infinity,x2=-Infinity,y2=-Infinity;
+  for(const q of pts){ x1=Math.min(x1,q[0]); y1=Math.min(y1,q[1]);
+                       x2=Math.max(x2,q[0]); y2=Math.max(y2,q[1]); }
+  const bboxAR = (x2-x1)/(y2-y1);
+  const fit = SA.minAreaRect(pts);
+  ok(Math.abs(bboxAR-2.39) > 0.1, "bbox should be badly wrong, got "+fmt(bboxAR));
+  near(fit.w/fit.h, 2.39, 0.02, "fitted aspect");
+  return "bbox 2.24:1 (off by "+fmt((bboxAR/2.39-1)*100)+"%), fit "+fmt(fit.w/fit.h)+":1";
+});
+
+t("normalizeRect keeps the width axis near horizontal", () => {
+  for(const phi of [0, 30, 60, 89, 91, 120, -80, 170]){
+    const r = SA.normalizeRect({cx:0,cy:0,w:200,h:100,t:phi*Math.PI/180});
+    ok(Math.abs(SA.deg(r.t)) <= 45.0001, phi+"deg normalized to "+fmt(SA.deg(r.t)));
+  }
+  // a rect described the "tall" way must come back as the same shape
+  const a = SA.normalizeRect({cx:0,cy:0,w:100,h:239,t:Math.PI/2});
+  near(a.w, 239, 1e-9, "width after swap");
+  near(a.h, 100, 1e-9, "height after swap");
+  return "t always in [-45,45], w/h swapped to match";
+});
+
+t("measure() is roll-invariant", () => {
+  // The same physical screen, photographed with the phone rolled. Every
+  // reported angle must be identical; only `roll` changes.
+  const base = SA.measure({cx:W/2, cy:H/2, w:1365, h:571, t:0}, W, H, F35);
+  const out = [];
+  for(const phi of [1,2,5,10]){
+    const m = SA.measure({cx:W/2, cy:H/2, w:1365, h:571, t:phi*Math.PI/180}, W, H, F35);
+    near(m.h, base.h, 1e-9, "horizontal at "+phi+"deg");
+    near(m.v, base.v, 1e-9, "vertical at "+phi+"deg");
+    near(m.ar, base.ar, 1e-9, "aspect at "+phi+"deg");
+    near(m.roll, phi, 1e-9, "roll readout at "+phi+"deg");
+    out.push(phi+"deg: V="+fmt(m.v));
+  }
+  return "V held at "+fmt(base.v)+" throughout ("+out.length+" angles)";
+});
+
+t("measure() still accepts a legacy axis-aligned box", () => {
+  const box = refBox(0,0);
+  const a = SA.measure(box, W, H, F35);
+  const b = SA.measure(SA.asRect(box), W, H, F35);
+  for(const k of ["h","v","d","seenH","seenV","off","ar"])
+    near(a[k], b[k], 1e-12, k);
+  ok(a.roll===0, "a box has no roll");
+  return "box and rect forms agree on every field";
+});
+
+t("corners and edgeMids sit where the rect says they do", () => {
+  const r = {cx:100, cy:50, w:200, h:100, t:Math.PI/6};
+  const cs = SA.corners(r), ms = SA.edgeMids(r);
+  // every corner is the same distance from the center
+  const half = Math.hypot(100,50);
+  for(const c of cs) near(Math.hypot(c[0]-r.cx, c[1]-r.cy), half, 1e-9, "corner radius");
+  // opposite edge midpoints straddle the center
+  near((ms[0][0]+ms[2][0])/2, r.cx, 1e-9, "top/bottom midpoint x");
+  near((ms[1][1]+ms[3][1])/2, r.cy, 1e-9, "left/right midpoint y");
+  // the width axis midpoints are w apart
+  near(Math.hypot(ms[1][0]-ms[3][0], ms[1][1]-ms[3][1]), r.w, 1e-9, "left-to-right span");
+  near(Math.hypot(ms[0][0]-ms[2][0], ms[0][1]-ms[2][1]), r.h, 1e-9, "top-to-bottom span");
+  return "geometry consistent at 30 degrees of roll";
+});
+
+t("toLocal and toWorld invert each other", () => {
+  const r = {cx:-30, cy:220, w:10, h:10, t:-1.1};
+  for(const [x,y] of [[0,0],[100,-40],[-7,3.5]]){
+    const [u,v] = SA.toLocal(r,x,y);
+    const [x2,y2] = SA.toWorld(r,u,v);
+    near(x2,x,1e-9,"x"); near(y2,y,1e-9,"y");
+  }
+  return "round trip clean at arbitrary roll";
+});
+
 /* ------------------------------ EXIF reader ------------------------------- */
 /* Synthesize a JPEG carrying an Exif APP1 segment, so the reader can be
    tested without binary fixtures in the repo. Both endiannesses, values
@@ -389,16 +513,6 @@ t("deviceKey separates resolutions of the same camera", () => {
 });
 
 /* ------------------------- known limitations ------------------------------ */
-known("camera roll inflates an axis-aligned box (Phase B: min-area rect)", () => {
-  const out=[];
-  for(const phi of [1,2,3]){
-    const p=phi*Math.PI/180, h=1, w=2.39;
-    const bw=w*Math.cos(p)+h*Math.sin(p), bh=h*Math.cos(p)+w*Math.sin(p);
-    out.push(phi+"deg: H+"+fmt((bw/w-1)*100)+"% V+"+fmt((bh/h-1)*100)+"% ar="+fmt(bw/bh));
-  }
-  return out.join("   ");
-});
-
 known("keystone from an off-centerline seat is uncorrected", () =>
   "a non-fronto-parallel screen breaks the uniform-magnification assumption " +
   "that head-on subtense and distance() both rest on");
