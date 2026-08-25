@@ -193,6 +193,201 @@ t("nearestAR snaps within 5% and abstains outside it", () => {
   return "abstains rather than guessing";
 });
 
+/* ------------------------------ EXIF reader ------------------------------- */
+/* Synthesize a JPEG carrying an Exif APP1 segment, so the reader can be
+   tested without binary fixtures in the repo. Both endiannesses, values
+   both inline (<=4 bytes) and out-of-line, are exercised. */
+function ascii(s){
+  const a = new Uint8Array(s.length+1);
+  for(let i=0;i<s.length;i++) a[i] = s.charCodeAt(i);
+  return a;                                   // trailing NUL
+}
+function rational(num,den,le){
+  const b = new ArrayBuffer(8), d = new DataView(b);
+  d.setUint32(0,num,le); d.setUint32(4,den,le);
+  return new Uint8Array(b);
+}
+function makeExifJpeg(le, f, opts){
+  opts = opts||{};
+  const ifd0=[], sub=[];
+  const E=(a,tag,type,count,inline,bytes)=>a.push({tag,type,count,inline,bytes});
+
+  if(f.make!=null)        E(ifd0,0x010F,2,f.make.length+1,null,ascii(f.make));
+  if(f.model!=null)       E(ifd0,0x0110,2,f.model.length+1,null,ascii(f.model));
+  if(f.orientation!=null) E(ifd0,0x0112,3,1,f.orientation,null);
+
+  const hasSub = ["focal","f35","zoom","pixelW","pixelH","lens"].some(k=>f[k]!=null);
+  let ptrIdx=-1;
+  if(hasSub){ E(ifd0,0x8769,4,1,0,null); ptrIdx=ifd0.length-1; }
+
+  if(f.focal!=null)  E(sub,0x920A,5,1,null,rational(Math.round(f.focal*100),100,le));
+  if(f.f35!=null)    E(sub,0xA405,3,1,f.f35,null);
+  if(f.zoom!=null)   E(sub,0xA404,5,1,null,rational(Math.round(f.zoom*1000),1000,le));
+  if(f.pixelW!=null) E(sub,0xA002,4,1,f.pixelW,null);
+  if(f.pixelH!=null) E(sub,0xA003,4,1,f.pixelH,null);
+  if(f.lens!=null)   E(sub,0xA434,2,f.lens.length+1,null,ascii(f.lens));
+
+  const ifdBytes = n => 2 + n*12 + 4;
+  const ifd0Off = 8;
+  const subOff  = ifd0Off + ifdBytes(ifd0.length);
+  const dataOff = subOff + (hasSub ? ifdBytes(sub.length) : 0);
+  if(ptrIdx>=0) ifd0[ptrIdx].inline = subOff;
+
+  let dataSize = 0;
+  for(const e of ifd0.concat(sub))
+    if(e.bytes && e.bytes.length>4) dataSize += e.bytes.length + (e.bytes.length%2);
+  const tiffLen = dataOff + dataSize;
+
+  const out = new Uint8Array(128 + tiffLen);
+  const dv = new DataView(out.buffer);
+  let p = 0;
+  const marker = v => { dv.setUint16(p,v); p+=2; };      // JPEG fields are big-endian
+  const idStr  = s => { for(let i=0;i<s.length;i++) out[p++] = s.charCodeAt(i); };
+
+  marker(0xFFD8);
+  if(opts.leadingXmp){                                   // an APP1 that is not Exif
+    const id = "http://ns.adobe.com/xap/1.0/\0";
+    marker(0xFFE1); marker(2+id.length); idStr(id);
+  }
+  marker(0xFFE1); marker(2+6+tiffLen); idStr("Exif\0\0");
+
+  const B = p;
+  dv.setUint16(B, le?0x4949:0x4D4D);
+  dv.setUint16(B+2, 0x002A, le);
+  dv.setUint32(B+4, ifd0Off, le);
+
+  let dcur = dataOff;
+  const writeIfd = (off, entries) => {
+    dv.setUint16(B+off, entries.length, le);
+    entries.forEach((e,i)=>{
+      const at = B+off+2+i*12;
+      dv.setUint16(at, e.tag, le);
+      dv.setUint16(at+2, e.type, le);
+      dv.setUint32(at+4, e.count, le);
+      if(e.bytes){
+        if(e.bytes.length <= 4){ out.set(e.bytes, at+8); }
+        else {
+          dv.setUint32(at+8, dcur, le);
+          out.set(e.bytes, B+dcur);
+          dcur += e.bytes.length + (e.bytes.length%2);
+        }
+      } else if(e.type === 3){ dv.setUint16(at+8, e.inline, le); }
+      else { dv.setUint32(at+8, e.inline, le); }
+    });
+    dv.setUint32(B+off+2+entries.length*12, 0, le);      // no next IFD
+  };
+  writeIfd(ifd0Off, ifd0);
+  if(hasSub) writeIfd(subOff, sub);
+  return out.buffer.slice(0, B+tiffLen);
+}
+
+const PHONE = {make:"Apple", model:"iPhone 15 Pro", orientation:6,
+               focal:6.86, f35:24, zoom:1, pixelW:4032, pixelH:3024,
+               lens:"iPhone 15 Pro back camera 6.86mm f/1.78"};
+
+t("EXIF round-trips every field, little-endian", () => {
+  const x = SA_EXIF.parse(makeExifJpeg(true, PHONE));
+  ok(x.make==="Apple", "make: "+x.make);
+  ok(x.model==="iPhone 15 Pro", "model: "+x.model);
+  ok(x.orientation===6, "orientation: "+x.orientation);
+  ok(x.f35===24, "f35: "+x.f35);
+  near(x.focal, 6.86, 1e-9, "focal");
+  near(x.zoom, 1, 1e-9, "zoom");
+  ok(x.pixelW===4032 && x.pixelH===3024, "pixel dims: "+x.pixelW+"x"+x.pixelH);
+  ok(x.lens && x.lens.indexOf("6.86mm")>=0, "lens: "+x.lens);
+  return "9 tags, ASCII + SHORT + LONG + RATIONAL";
+});
+
+t("EXIF round-trips every field, big-endian", () => {
+  const le = SA_EXIF.parse(makeExifJpeg(true, PHONE));
+  const be = SA_EXIF.parse(makeExifJpeg(false, PHONE));
+  for(const k in le) ok(JSON.stringify(le[k])===JSON.stringify(be[k]),
+    "endianness changed "+k+": "+le[k]+" vs "+be[k]);
+  return "MM matches II on all fields";
+});
+
+t("EXIF reads an ASCII value short enough to sit inline", () => {
+  // 3 bytes with the NUL, so it lives in the entry rather than the data area
+  const x = SA_EXIF.parse(makeExifJpeg(true, {make:"LG", f35:20}));
+  ok(x.make==="LG", "make: "+x.make);
+  ok(x.f35===20, "f35: "+x.f35);
+  return "inline and out-of-line paths both work";
+});
+
+t("EXIF skips a non-Exif APP1 to find the real one", () => {
+  const x = SA_EXIF.parse(makeExifJpeg(true, PHONE, {leadingXmp:true}));
+  ok(x.f35===24, "did not reach the Exif segment past XMP");
+  return "marker walk steps over XMP";
+});
+
+t("EXIF degrades to nulls rather than throwing", () => {
+  const cases = {
+    "empty":        new ArrayBuffer(0),
+    "not a jpeg":   new Uint8Array([1,2,3,4,5,6,7,8]).buffer,
+    "SOI only":     new Uint8Array([0xFF,0xD8]).buffer,
+    "no APP1":      new Uint8Array([0xFF,0xD8,0xFF,0xDB,0,4,1,2,0xFF,0xD9]).buffer,
+    "truncated":    makeExifJpeg(true, PHONE).slice(0, 20),
+  };
+  for(const name in cases){
+    const x = SA_EXIF.parse(cases[name]);
+    ok(x && x.f35===null, name+" should yield a null f35, got "+(x&&x.f35));
+  }
+  return Object.keys(cases).length+" malformed inputs, no throw";
+});
+
+t("EXIF ignores a rational with a zero denominator", () => {
+  const buf = makeExifJpeg(true, {focal:6.86, f35:24});
+  const dv = new DataView(buf);
+  // Zero out the focal length's denominator wherever it landed in the data area
+  let patched = false;
+  for(let i=0;i+8<=dv.byteLength;i++){
+    if(dv.getUint32(i,true)===686 && dv.getUint32(i+4,true)===100){
+      dv.setUint32(i+4, 0, true); patched = true; break;
+    }
+  }
+  ok(patched, "test setup: never found the 686/100 rational to corrupt");
+  const x = SA_EXIF.parse(buf);
+  ok(x.focal===null, "expected null, got "+x.focal);
+  ok(x.f35===24, "unrelated tags should survive");
+  return "no division by zero, no Infinity";
+});
+
+t("plausibleF35 rejects values a phone cannot have", () => {
+  ok(SA_EXIF.plausibleF35(26), "26mm is normal");
+  ok(SA_EXIF.plausibleF35(120), "120mm is a long tele");
+  ok(!SA_EXIF.plausibleF35(0), "zero");
+  ok(!SA_EXIF.plausibleF35(4), "4mm is below any phone equivalent");
+  ok(!SA_EXIF.plausibleF35(9000), "absurd");
+  ok(!SA_EXIF.plausibleF35(null), "missing");
+  ok(!SA_EXIF.plausibleF35("26"), "a string is not a measurement");
+  return "guards against a garbage tag becoming a confident answer";
+});
+
+t("zoomed() treats the spec's 0 as 'not used'", () => {
+  ok(!SA_EXIF.zoomed(0),    "0 means digital zoom was not used");
+  ok(!SA_EXIF.zoomed(1),    "1x is not zoomed");
+  ok(!SA_EXIF.zoomed(null), "absent tag is not evidence of zoom");
+  ok(SA_EXIF.zoomed(2),     "2x should warn");
+  ok(SA_EXIF.zoomed(1.5),   "1.5x should warn");
+  return "only >1.01 warns";
+});
+
+t("cropFactor divides the two focal-length tags", () => {
+  near(SA_EXIF.cropFactor({f35:24, focal:6.86}), 24/6.86, 1e-9);
+  ok(SA_EXIF.cropFactor({f35:24, focal:null})===null, "needs both tags");
+  ok(SA_EXIF.cropFactor({f35:0, focal:6.86})===null, "rejects zero");
+  return fmt(24/6.86)+"x for an iPhone main camera";
+});
+
+t("deviceKey separates resolutions of the same camera", () => {
+  const a = SA_EXIF.deviceKey({make:"Apple",model:"iPhone 15 Pro"}, 4032, 3024);
+  const b = SA_EXIF.deviceKey({make:"Apple",model:"iPhone 15 Pro"}, 8064, 6048);
+  ok(a !== b, "pixel pitch changes with resolution, so the key must too");
+  ok(SA_EXIF.deviceKey({make:null,model:null}, 100, 50) === "unknown@100",
+     "unidentified device still gets a usable key");
+  return a;
+});
+
 /* ------------------------- known limitations ------------------------------ */
 known("camera roll inflates an axis-aligned box (Phase B: min-area rect)", () => {
   const out=[];

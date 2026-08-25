@@ -9,4 +9,4 @@ set -e
 JSC=/System/Library/Frameworks/JavaScriptCore.framework/Versions/A/Helpers/jsc
 [ -x "$JSC" ] || { echo "jsc not found at $JSC -- open tests.html instead"; exit 127; }
 cd "$(dirname "$0")"
-"$JSC" -e 'globalThis.window = globalThis;' geom.js tests.js
+"$JSC" -e 'globalThis.window = globalThis;' geom.js exif.js tests.js
