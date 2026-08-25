@@ -4,6 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Screen Angle</title>
+<meta name="description" content="Measure the angular subtense of a cinema or TV screen from a single phone photo.">
+<!-- Relative hrefs: this ships under a GitHub Pages project subpath, where a
+     leading "/" would resolve to the user root and 404. -->
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" href="./icon-192.png" sizes="192x192" type="image/png">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
+<meta name="theme-color" content="#1B1C1F">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Screen Angle">
 <style>
 :root{
   --field:#2A2B2E;
@@ -238,6 +249,13 @@ code{font:600 12px ui-monospace,Menlo,monospace;color:var(--ink)}
 
 <script src="geom.js"></script>
 <script src="exif.js"></script>
+<script>
+/* Register the offline cache. isSecureContext rather than a protocol check, so
+   localhost during development counts and file:// quietly does not. */
+if("serviceWorker" in navigator && window.isSecureContext){
+  addEventListener("load", () => navigator.serviceWorker.register("./sw.js").catch(()=>{}));
+}
+</script>
 <script>
 (function(){
 "use strict";
