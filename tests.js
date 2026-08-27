@@ -688,6 +688,67 @@ t("EXIF ignores a rational with a zero denominator", () => {
   return "no division by zero, no Infinity";
 });
 
+t("dump() names the container and finds the Exif segment", () => {
+  const r = SA_EXIF.dump(makeExifJpeg(true, PHONE));
+  ok(r.container === "JPEG", "container was " + r.container);
+  ok(r.exifAt > 0, "should locate the TIFF header, got " + r.exifAt);
+  ok(r.byteOrder.indexOf("little") > 0, "byte order was " + r.byteOrder);
+  const names = r.ifds.map(i => i.name);
+  ok(names.length >= 2, "expected IFD0 and the Exif sub-IFD, got " + names);
+  const sub = r.ifds.find(i => i.name.indexOf("sub-IFD") >= 0);
+  const f35 = sub.entries.find(e => e.tag === 0xA405);
+  ok(f35 && f35.name === "FocalLengthIn35mmFilm", "f35 entry missing from the dump");
+  ok(f35.value === 24, "f35 value was " + (f35 && f35.value));
+  ok(f35.typeName === "SHORT", "f35 type was " + f35.typeName);
+  return r.ifds.map(i => i.name + ":" + i.entries.length).join("  ");
+});
+
+t("dump() distinguishes the three ways a focal length can be absent", () => {
+  // 1: not a JPEG at all -- a HEIC that never got transcoded
+  const heic = new Uint8Array(24);
+  heic.set([0,0,0,24], 0);
+  "ftypheic".split("").forEach((c,i) => heic[4+i] = c.charCodeAt(0));
+  const a = SA_EXIF.dump(heic.buffer);
+  ok(a.container.indexOf("ISOBMFF") === 0, "HEIC container read as " + a.container);
+  ok(a.exifAt < 0 && a.note, "should say why it found nothing");
+
+  // 2: a JPEG carrying no Exif APP1 at all
+  const bare = new Uint8Array([0xFF,0xD8, 0xFF,0xDB,0,4,1,2, 0xFF,0xD9]);
+  const b = SA_EXIF.dump(bare.buffer);
+  ok(b.container === "JPEG", "container was " + b.container);
+  ok(b.exifAt < 0, "should find no Exif segment");
+  ok(b.note.indexOf("stripped") > 0, "note was " + b.note);
+  ok(b.segments.length >= 2, "should still list the markers it did find");
+
+  // 3: Exif present, but the focal length tag is not in it
+  const c = SA_EXIF.dump(makeExifJpeg(true, {make:"Apple", model:"iPhone", focal:6.86}));
+  ok(c.exifAt > 0, "should find the Exif segment");
+  const sub = c.ifds.find(i => i.name.indexOf("sub-IFD") >= 0);
+  ok(sub && !sub.entries.some(e => e.tag === 0xA405), "f35 should be absent here");
+  ok(sub.entries.some(e => e.tag === 0x920A), "but FocalLength should be present");
+  return "HEIC / no-APP1 / no-tag all separable";
+});
+
+t("segments() lists JPEG markers and identifies APP segments", () => {
+  const segs = SA_EXIF.segments(makeExifJpeg(true, PHONE, {leadingXmp:true}));
+  const app1 = segs.filter(s => s.marker === "APP1");
+  ok(app1.length === 2, "expected two APP1 segments, got " + app1.length);
+  ok(app1[0].id.indexOf("http") === 0, "first APP1 should be XMP, id was " + app1[0].id);
+  ok(app1[1].id.indexOf("Exif") === 0, "second APP1 should be Exif, id was " + app1[1].id);
+  ok(segs[0].marker === "SOI", "should start at SOI");
+  return segs.map(s => s.marker + (s.id ? "(" + s.id.slice(0,6) + ")" : "")).join(" ");
+});
+
+t("dump() never throws on malformed input", () => {
+  for(const buf of [new ArrayBuffer(0), new ArrayBuffer(3),
+                    new Uint8Array([0xFF,0xD8,0xFF,0xE1,0,4]).buffer,
+                    makeExifJpeg(true, PHONE).slice(0, 30)]){
+    const r = SA_EXIF.dump(buf);
+    ok(r && typeof r.container === "string", "no report for a " + buf.byteLength + "-byte input");
+  }
+  return "4 malformed inputs, all reported rather than thrown";
+});
+
 t("plausibleF35 rejects values a phone cannot have", () => {
   ok(SA_EXIF.plausibleF35(26), "26mm is normal");
   ok(SA_EXIF.plausibleF35(120), "120mm is a long tele");

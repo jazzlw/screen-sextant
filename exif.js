@@ -122,6 +122,177 @@ function parse(buf){
   return out;
 }
 
+/* ---------------------------------------------------------------------------
+   Diagnostics. parse() answers "what is the focal length"; these answer "what
+   is actually in this file", which is the question when parse() comes back
+   empty and you need to know whether the tag is missing, the Exif segment is
+   missing, or the file is not a JPEG at all. Three different problems.
+   --------------------------------------------------------------------------- */
+
+const TYPE_NAME = {1:"BYTE", 2:"ASCII", 3:"SHORT", 4:"LONG", 5:"RATIONAL",
+                   7:"UNDEFINED", 9:"SLONG", 10:"SRATIONAL"};
+
+const TAG_NAME = {
+  0x010E:"ImageDescription", 0x010F:"Make", 0x0110:"Model", 0x0112:"Orientation",
+  0x011A:"XResolution", 0x011B:"YResolution", 0x0128:"ResolutionUnit",
+  0x0131:"Software", 0x0132:"DateTime", 0x013B:"Artist", 0x0213:"YCbCrPositioning",
+  0x8298:"Copyright", 0x8769:"ExifIFDPointer", 0x8825:"GPSInfoIFDPointer",
+  0x829A:"ExposureTime", 0x829D:"FNumber", 0x8822:"ExposureProgram",
+  0x8827:"ISOSpeedRatings", 0x9000:"ExifVersion", 0x9003:"DateTimeOriginal",
+  0x9004:"DateTimeDigitized", 0x9201:"ShutterSpeedValue", 0x9202:"ApertureValue",
+  0x9204:"ExposureBiasValue", 0x9205:"MaxApertureValue", 0x9207:"MeteringMode",
+  0x9209:"Flash", 0x920A:"FocalLength", 0x927C:"MakerNote", 0x9286:"UserComment",
+  0xA000:"FlashpixVersion", 0xA001:"ColorSpace", 0xA002:"PixelXDimension",
+  0xA003:"PixelYDimension", 0xA005:"InteroperabilityIFDPointer",
+  0xA402:"ExposureMode", 0xA403:"WhiteBalance", 0xA404:"DigitalZoomRatio",
+  0xA405:"FocalLengthIn35mmFilm", 0xA406:"SceneCaptureType", 0xA408:"Contrast",
+  0xA409:"Saturation", 0xA40A:"Sharpness", 0xA432:"LensSpecification",
+  0xA433:"LensMake", 0xA434:"LensModel", 0xA435:"LensSerialNumber",
+  0xA460:"CompositeImage",
+};
+
+const MARKER_NAME = {
+  0xD8:"SOI", 0xD9:"EOI", 0xDA:"SOS", 0xDB:"DQT", 0xC4:"DHT", 0xDD:"DRI",
+  0xC0:"SOF0 baseline", 0xC1:"SOF1", 0xC2:"SOF2 progressive", 0xC3:"SOF3",
+  0xFE:"COM",
+};
+function markerName(m){
+  if(MARKER_NAME[m]) return MARKER_NAME[m];
+  if(m >= 0xE0 && m <= 0xEF) return "APP" + (m - 0xE0);
+  return "0x" + m.toString(16).toUpperCase();
+}
+
+function tagName(t){
+  return TAG_NAME[t] || ("0x" + t.toString(16).toUpperCase().padStart(4,"0"));
+}
+
+/* What kind of file is this really? A camera-captured image that arrives as
+   HEIC rather than JPEG explains an empty parse() on its own. */
+function container(buf){
+  try{
+    const dv = new DataView(buf);
+    // Check each magic against its own length requirement -- a truncated but
+    // genuine JPEG should still be named as one.
+    if(dv.byteLength < 2) return "too short (" + dv.byteLength + " bytes)";
+    if(dv.getUint16(0) === 0xFFD8) return "JPEG";
+    if(dv.byteLength >= 4 && dv.getUint32(0) === 0x89504E47) return "PNG";
+    if(dv.byteLength >= 12){
+      let box = "";
+      for(let i=4;i<8;i++) box += String.fromCharCode(dv.getUint8(i));
+      if(box === "ftyp"){
+        let brand = "";
+        for(let i=8;i<12;i++) brand += String.fromCharCode(dv.getUint8(i));
+        return "ISOBMFF/" + brand.trim() + " (HEIC family - no Exif parser here)";
+      }
+    }
+    if(dv.getUint16(0) === 0x4949 || dv.getUint16(0) === 0x4D4D) return "TIFF";
+    return "unrecognised";
+  }catch(e){ return "unreadable"; }
+}
+
+/* Every JPEG marker segment, so a missing APP1 is visible as an absence
+   rather than inferred from a null. */
+function segments(buf){
+  const out = [];
+  try{
+    const dv = new DataView(buf);
+    if(dv.byteLength < 2 || dv.getUint16(0) !== 0xFFD8) return out;
+    out.push({marker:"SOI", at:0, length:0, id:null});
+    let p = 2;
+    while(p < dv.byteLength - 1){
+      if(dv.getUint8(p) !== 0xFF){ p++; continue; }
+      const m = dv.getUint8(p+1);
+      if(m === 0xFF){ p++; continue; }                     // fill byte
+      if(m === 0x01 || (m >= 0xD0 && m <= 0xD8)){
+        out.push({marker:markerName(m), at:p, length:0, id:null});
+        p += 2; continue;
+      }
+      if(m === 0xD9){ out.push({marker:"EOI", at:p, length:0, id:null}); break; }
+      if(p + 4 > dv.byteLength) break;
+      const len = dv.getUint16(p+2);
+      let id = null;
+      if(m >= 0xE0 && m <= 0xEF){
+        id = "";
+        for(let i=0;i<Math.min(16, len-2);i++){
+          const c = dv.getUint8(p+4+i);
+          if(!c) break;
+          id += (c >= 32 && c < 127) ? String.fromCharCode(c) : ".";
+        }
+      }
+      out.push({marker:markerName(m), at:p, length:len, id:id});
+      if(m === 0xDA) break;                                // image data follows
+      if(len < 2) break;
+      p += 2 + len;
+    }
+  }catch(e){}
+  return out;
+}
+
+/* Every entry in every IFD, named and typed. Long binary blobs report their
+   size rather than their contents. */
+function ifdEntries(dv, base, ifd, le){
+  const out = [];
+  if(ifd + 2 > dv.byteLength) return out;
+  const n = dv.getUint16(ifd, le);
+  if(n > 512) return out;                                  // implausible; bail
+  for(let i=0;i<n;i++){
+    const e = ifd + 2 + i*12;
+    if(e + 12 > dv.byteLength) break;
+    const tag = dv.getUint16(e, le);
+    const type = dv.getUint16(e+2, le);
+    const count = dv.getUint32(e+4, le);
+    const size = SIZE[type];
+    let val;
+    if(!size) val = "<unknown type " + type + ">";
+    else if(size*count > 64 && type !== 2) val = "<" + (size*count) + " bytes>";
+    else val = value(dv, base, e, le);
+    out.push({tag, name:tagName(tag), type, typeName:TYPE_NAME[type] || ("type"+type),
+              count, value: val});
+  }
+  return out;
+}
+
+/* Full report for the diagnostics page. Never throws. */
+function dump(buf){
+  const report = {container: container(buf), bytes: buf && buf.byteLength || 0,
+                  segments: [], exifAt: -1, byteOrder: null, ifds: [], note: null};
+  try{
+    report.segments = segments(buf);
+    const dv = new DataView(buf);
+    const base = findTiff(dv);
+    report.exifAt = base;
+    if(base < 0){
+      report.note = report.container === "JPEG"
+        ? "JPEG with no Exif APP1 segment: the metadata was never written, or was stripped."
+        : "No JPEG Exif segment to read.";
+      return report;
+    }
+    const bo = dv.getUint16(base);
+    if(bo !== 0x4949 && bo !== 0x4D4D){ report.note = "Exif segment has a bad byte order mark."; return report; }
+    const le = (bo === 0x4949);
+    report.byteOrder = le ? "II (little-endian)" : "MM (big-endian)";
+
+    const ifd0 = base + dv.getUint32(base+4, le);
+    report.ifds.push({name:"IFD0 (image)", entries: ifdEntries(dv, base, ifd0, le)});
+
+    const sub = tag(dv, base, ifd0, EXIF_PTR, le);
+    if(sub != null)
+      report.ifds.push({name:"Exif sub-IFD", entries: ifdEntries(dv, base, base+sub, le)});
+    else
+      report.note = "IFD0 present but no Exif sub-IFD pointer, which is where the focal length lives.";
+
+    const gps = tag(dv, base, ifd0, 0x8825, le);
+    if(gps != null)
+      report.ifds.push({name:"GPS IFD", entries: ifdEntries(dv, base, base+gps, le)});
+
+    // IFD1 holds the thumbnail; occasionally the only place tags survive
+    const next = dv.getUint32(ifd0 + 2 + dv.getUint16(ifd0, le)*12, le);
+    if(next > 0 && base + next < dv.byteLength)
+      report.ifds.push({name:"IFD1 (thumbnail)", entries: ifdEntries(dv, base, base+next, le)});
+  }catch(e){ report.note = "Parse aborted: " + e.message; }
+  return report;
+}
+
 /* Plausible 35mm-equivalent focal length for a phone or compact camera.
    Guards against a garbage tag becoming a confident wrong answer. */
 function plausibleF35(v){ return typeof v === "number" && v > 5 && v < 400; }
@@ -145,5 +316,6 @@ function deviceKey(x, W, H){
   return id + "@" + Math.max(W, H);
 }
 
-return {parse, plausibleF35, zoomed, cropFactor, deviceKey, tag, findTiff};
+return {parse, plausibleF35, zoomed, cropFactor, deviceKey, tag, findTiff,
+        dump, container, segments, tagName, markerName};
 })();

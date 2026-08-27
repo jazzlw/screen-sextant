@@ -221,6 +221,7 @@ code{font:600 12px ui-monospace,Menlo,monospace;color:var(--ink)}
         <input type="number" id="f35" min="8" max="300" step="0.1">
         <span class="flag" id="f35src">—</span>
         <button class="link" id="calib">save for this camera</button>
+        <button class="link" id="calibAny">use when file has none</button>
       </div>
       <div class="row" id="calibRow" style="display:none">
         <span class="hint" style="margin:0" id="calibNote"></span>
@@ -248,7 +249,7 @@ code{font:600 12px ui-monospace,Menlo,monospace;color:var(--ink)}
   <p><strong style="color:var(--ink)">Keystone.</strong> Off the centreline a screen images as a trapezoid, and the fronto-parallel shortcut above stops holding. With <code>f_px</code> known, two vanishing points give the 3D directions of the screen's edges, their cross product gives the plane normal, and back-projecting each corner ray onto that plane recovers the true rectangle up to one overall scale — which is all the angles need. At 20° off the centreline, ignoring this reads the aspect ratio 13% low.</p>
   <p><strong style="color:var(--ink)">Error budget.</strong> EXIF reports a rounded nominal focal length, so expect 1–2% — photograph a known length at a laser-ranged distance, back out <code>f_px</code>, type the implied f₃₅ here and save it for the camera. Camera roll and keystone are both fitted rather than assumed away, so neither a hand-held tilt nor an off-centreline seat inflates the reading. Don't pinch-zoom, though: digital crop is silent unless the camera tags it. And if the file carries no focal length, nothing is reported until you supply one — every angle scales directly with it.</p>
   <p><strong style="color:var(--ink)">What it detects.</strong> The projected image, not the physical screen. With masking closed on a scope feature you'll get 2.39:1 and that's the honest answer for what you're watching.</p>
-  <p><a href="tests.html">Geometry test suite &rarr;</a></p>
+  <p><a href="tests.html">Geometry test suite &rarr;</a> &nbsp; <a href="probe.html">EXIF probe &rarr;</a></p>
 </footer>
 
 </div>
@@ -278,6 +279,11 @@ let meta=null;           // parsed EXIF
 let devKey=null;
 
 const CAL_KEY="screenangle.cal.v1";
+/* Reserved key inside the calibration store for "use this whenever the file
+   carries no focal length". Distinct from a per-device calibration: it is a
+   deliberate user-supplied fallback, not a measurement of a known camera, and
+   it is labelled that way in the readout so it never passes for EXIF. */
+const FALLBACK_KEY="*";
 
 /* ---------------- calibration store --------------------------------------- */
 /* A self-calibrated f35 is good forever for that lens at that resolution, so
@@ -433,9 +439,10 @@ function update(){
     blankReadout();
     $("needF").className="banner on";
     $("needF").innerHTML="<strong>No focal length in this file.</strong> Angles scale directly "+
-      "with it, so nothing is reported until it is known. Enter the 35mm-equivalent focal "+
-      "length below \u2014 it is in your camera app\u2019s spec sheet, and typically 24\u201326\u202fmm "+
-      "for a phone\u2019s main camera.";
+      "with it, so nothing is reported until it is known. Enter the 35mm-equivalent below, "+
+      "then <em>use when file has none</em> to stop being asked \u2014 that saves your own "+
+      "number, not a guess. <a href=\"probe.html\" style=\"color:var(--bar-cyan)\">The EXIF "+
+      "probe</a> shows why the tag is missing.";
     return;
   }
   $("needF").className="banner";
@@ -642,24 +649,34 @@ function setF35(v,kind){
   f35 = (v>0) ? v : null;
   $("f35").value = f35 ? Math.round(f35*100)/100 : "";
   $("f35src").textContent =
-    {exif:"from EXIF", cal:"calibrated", unknown:"not in file — enter it", manual:"manual"}[kind];
-  $("f35src").className = "flag " + {exif:"ok", cal:"cal", unknown:"warn", manual:""}[kind];
+    {exif:"from EXIF", cal:"calibrated", fallback:"your saved default",
+     unknown:"not in file — enter it", manual:"manual"}[kind];
+  $("f35src").className = "flag " +
+    {exif:"ok", cal:"cal", fallback:"cal", unknown:"warn", manual:""}[kind];
 }
 
 function showCalState(){
   const store=calRead();
-  const has=devKey && store[devKey]!=null;
-  $("calibRow").style.display=has?"flex":"none";
-  if(has){
-    $("calibNote").innerHTML="Saved "+store[devKey]+" mm for <code>"+devKey+"</code> — "+
-      '<button class="link" id="forget">forget</button>';
-    $("forget").onclick=()=>{
-      const s=calRead(); delete s[devKey]; calWrite(s);
-      showCalState();
-      if(meta && SA_EXIF.plausibleF35(meta.f35)) setF35(meta.f35,"exif"); else setF35(null,"unknown");
-      update();
-    };
-  }
+  const dev=devKey && store[devKey]!=null ? store[devKey] : null;
+  const fb=store[FALLBACK_KEY]!=null ? store[FALLBACK_KEY] : null;
+  $("calibRow").style.display=(dev!=null||fb!=null)?"flex":"none";
+  const bits=[];
+  if(dev!=null) bits.push("Saved <b>"+dev+" mm</b> for <code>"+devKey+
+    "</code> \u2014 <button class=\"link\" id=\"forget\">forget</button>");
+  if(fb!=null) bits.push("Fallback for files with no focal length: <b>"+fb+
+    " mm</b> \u2014 <button class=\"link\" id=\"forgetFb\">forget</button>");
+  $("calibNote").innerHTML=bits.join("<br>");
+  const reset=()=>{
+    showCalState();
+    const st=calRead();
+    if(devKey && st[devKey]!=null)               setF35(st[devKey],"cal");
+    else if(meta && SA_EXIF.plausibleF35(meta.f35)) setF35(meta.f35,"exif");
+    else if(st[FALLBACK_KEY]!=null)              setF35(st[FALLBACK_KEY],"fallback");
+    else                                         setF35(null,"unknown");
+    update();
+  };
+  if($("forget"))   $("forget").onclick=()=>{ const st=calRead(); delete st[devKey]; calWrite(st); reset(); };
+  if($("forgetFb")) $("forgetFb").onclick=()=>{ const st=calRead(); delete st[FALLBACK_KEY]; calWrite(st); reset(); };
 }
 
 async function load(file){
@@ -682,9 +699,10 @@ async function load(file){
   meta=meta||{};
   devKey=SA_EXIF.deviceKey(meta,W,H);
   const store=calRead();
-  if(store[devKey]!=null)                    setF35(store[devKey],"cal");
-  else if(SA_EXIF.plausibleF35(meta.f35))    setF35(meta.f35,"exif");
-  else                                       setF35(null,"unknown");
+  if(store[devKey]!=null)                       setF35(store[devKey],"cal");
+  else if(SA_EXIF.plausibleF35(meta.f35))       setF35(meta.f35,"exif");
+  else if(store[FALLBACK_KEY]!=null)            setF35(store[FALLBACK_KEY],"fallback");
+  else                                          setF35(null,"unknown");
   showCalState();
 
   // digital zoom is the one error big enough to invalidate the reading outright
@@ -754,6 +772,12 @@ $("f35").oninput=e=>{
   $("f35src").textContent = f35 ? "manual" : "not in file — enter it";
   $("f35src").className = "flag" + (f35 ? "" : " warn");
   update();
+};
+$("calibAny").onclick=()=>{
+  if(!(f35>0)) return;
+  const st=calRead();
+  st[FALLBACK_KEY]=Math.round(f35*100)/100;
+  if(calWrite(st)){ setF35(st[FALLBACK_KEY],"fallback"); showCalState(); update(); }
 };
 $("calib").onclick=()=>{
   if(!img||!devKey||!(f35>0)) return;

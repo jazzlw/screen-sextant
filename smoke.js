@@ -253,6 +253,55 @@ check("calibration round-trips through storage and can be forgotten", () => {
   return $("calibNote").innerHTML.replace(/<[^>]+>/g,"");
 });
 
+check("a saved fallback fills in for files with no focal length", () => {
+  STORE = {};
+  t.setQuad(clone(SQUARE));
+  // no EXIF at all, as a stripped camera capture arrives
+  t.setMeta({make:null, model:null}, "unknown@4032");
+  t.setF35(null, "unknown");
+  t.update();
+  ok($("needF").className.indexOf("on") >= 0, "should prompt with nothing saved");
+
+  // the user types their own measured value and saves it as the fallback
+  $("f35").value = "25.4";
+  $("f35").oninput({target:$("f35")});
+  $("calibAny").onclick();
+  ok(t.calRead()["*"] === 25.4, "fallback not persisted: " + JSON.stringify(t.calRead()));
+  ok($("f35src").textContent === "your saved default",
+     "provenance was '" + $("f35src").textContent + "'");
+  ok($("f35src").textContent !== "from EXIF", "a fallback must never read as EXIF");
+  ok($("needF").className.indexOf("on") < 0, "prompt should clear");
+  ok($("calibNote").innerHTML.indexOf("no focal length") > 0,
+     "note should explain what the fallback is: " + $("calibNote").innerHTML);
+  return "fallback applied and labelled distinctly from EXIF";
+});
+
+check("real EXIF outranks a saved fallback", () => {
+  STORE = {};
+  t.calWrite({"*": 25.4});
+  ok(t.calRead()["*"] === 25.4, "setup");
+  // a file that does carry the tag must use it, not the fallback
+  t.setF35(24, "exif");
+  ok($("f35src").textContent === "from EXIF", "EXIF should win");
+  ok($("f35").value === 24, "value should be the EXIF one");
+  STORE = {};
+  return "precedence: per-device calibration > EXIF > fallback > nothing";
+});
+
+check("a fallback of zero or garbage is never saved", () => {
+  STORE = {};
+  for(const v of ["", "0", "-3", "abc"]){
+    $("f35").value = v;
+    $("f35").oninput({target:$("f35")});
+    $("calibAny").onclick();
+    ok(t.calRead()["*"] === undefined,
+       "saved a bad fallback from input " + JSON.stringify(v) + ": " + JSON.stringify(t.calRead()));
+  }
+  STORE = {};
+  t.setF(26);
+  return "4 bad inputs, nothing persisted";
+});
+
 check("calRead survives storage being unavailable", () => {
   const real = globalThis.localStorage;
   globalThis.localStorage = { getItem(){ throw new Error("SecurityError"); },

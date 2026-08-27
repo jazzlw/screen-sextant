@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Screen Sextant — EXIF probe</title>
+<meta name="theme-color" content="#1B1C1F">
+<style>
+:root{
+  --field:#2A2B2E; --panel:#1B1C1F; --panel-2:#232427;
+  --ink:#EDEAE3; --ink-dim:#9A9AA0; --rule:#4A4B50;
+  --bar-cyan:#3FA9B4; --bar-yellow:#C9B233; --bar-magenta:#A8558C;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{background:var(--field);color:var(--ink);padding:0 0 48px;
+  font:400 15px/1.5 ui-sans-serif,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  -webkit-font-smoothing:antialiased}
+.wrap{max-width:680px;margin:0 auto;padding:0 18px}
+header{padding:26px 0 18px;border-bottom:1px solid var(--rule)}
+.eyebrow{font:600 10px/1 ui-monospace,Menlo,monospace;letter-spacing:.22em;
+  text-transform:uppercase;color:var(--bar-cyan);margin:0 0 12px}
+h1{font:800 30px/1 ui-sans-serif,-apple-system,Helvetica,Arial,sans-serif;
+  letter-spacing:-.03em;margin:0 0 8px}
+h1 em{font-style:normal;color:var(--ink-dim)}
+.sub{margin:0;color:var(--ink-dim);font-size:14px;max-width:56ch}
+h2{font:600 11px/1 ui-monospace,Menlo,monospace;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--ink-dim);margin:26px 0 10px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+button{font:600 13px/1.3 ui-sans-serif,-apple-system,Helvetica,Arial,sans-serif;
+  background:var(--ink);color:#17181A;border:0;padding:14px 12px;border-radius:2px;
+  cursor:pointer;width:100%}
+button.ghost{background:transparent;color:var(--ink);border:1px solid var(--rule)}
+button small{display:block;font:400 10px/1.3 ui-monospace,Menlo,monospace;
+  opacity:.65;margin-top:4px;text-transform:none;letter-spacing:0}
+button:focus-visible{outline:2px solid var(--bar-cyan);outline-offset:2px}
+input[type=file]{display:none}
+.verdict{margin:20px 0 0;padding:14px 16px;border-left:3px solid var(--rule);
+  background:var(--panel);font-size:14px;display:none}
+.verdict.on{display:block}
+.verdict.good{border-left-color:var(--bar-cyan)}
+.verdict.bad{border-left-color:var(--bar-magenta)}
+.verdict b{font-weight:600}
+.verdict p{margin:0 0 8px}
+.verdict p:last-child{margin:0}
+pre{background:var(--panel);border:1px solid var(--rule);border-radius:2px;
+  padding:14px;overflow-x:auto;font:400 11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+  color:var(--ink);margin:12px 0 0;white-space:pre;-webkit-user-select:all;user-select:all}
+.row{display:flex;gap:10px;align-items:center;margin-top:12px;flex-wrap:wrap}
+.hint{font:400 12px/1.5 ui-monospace,Menlo,monospace;color:var(--ink-dim);margin:10px 0 0}
+ol.steps{color:var(--ink-dim);font-size:13.5px;padding-left:22px;margin:10px 0 0}
+ol.steps li{margin-bottom:7px}
+footer{margin-top:30px;padding-top:18px;border-top:1px solid var(--rule);
+  color:var(--ink-dim);font-size:12.5px}
+a{color:var(--bar-cyan)}
+code{font:600 12px ui-monospace,Menlo,monospace;color:var(--ink)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <p class="eyebrow">Diagnostics</p>
+  <h1>EXIF probe <em>/ what&rsquo;s really in the file</em></h1>
+  <p class="sub">The main tool needs one tag: <code>FocalLengthIn35mmFilm</code>. This shows
+  everything the file carries, so a missing focal length can be traced to a cause instead
+  of guessed at.</p>
+</header>
+
+<h2>Four ways in — try each</h2>
+<div class="grid">
+  <button id="camJpeg">Camera<small>accept=image/jpeg<br>capture=environment</small></button>
+  <button id="camAny" class="ghost">Camera<small>accept=image/*<br>capture=environment</small></button>
+  <button id="libJpeg" class="ghost">Library / files<small>accept=image/jpeg</small></button>
+  <button id="libAny" class="ghost">Library / files<small>accept=image/*</small></button>
+</div>
+<p class="hint">The two variables are whether the camera is opened in-page and whether a
+concrete MIME type is requested. Running all four says which one matters.</p>
+
+<input type="file" id="file">
+
+<div class="verdict" id="verdict"></div>
+
+<div id="out"></div>
+
+<div class="row" id="actions" style="display:none">
+  <button id="copy" style="width:auto">Copy report</button>
+  <span class="hint" id="copied" style="margin:0"></span>
+</div>
+
+<h2>What to compare</h2>
+<ol class="steps">
+  <li>Shoot the <em>same scene</em> both ways, so only the path differs.</li>
+  <li>Check <b>Container</b> first. <code>ISOBMFF/heic</code> means iOS handed over the
+      original HEIC and never transcoded — the parser is JPEG-only, so nothing else matters.</li>
+  <li>Then <b>Exif APP1</b>. Absent on a JPEG means the metadata was never written or was
+      stripped in the capture path. That is not something this page can work around.</li>
+  <li>Then look for <code>FocalLengthIn35mmFilm</code> in the Exif sub-IFD. Present but
+      unreadable is a parser bug and my problem; absent is the camera&rsquo;s choice.</li>
+  <li>If <code>FocalLength</code> survives but <code>FocalLengthIn35mmFilm</code> doesn&rsquo;t,
+      say so — the 35mm equivalent can be reconstructed from it plus a per-device crop factor.</li>
+</ol>
+
+<footer>
+  <p>Nothing leaves the device. The file is read in the page and never uploaded.</p>
+  <p><a href="index.html">&larr; back to the tool</a></p>
+</footer>
+
+</div>
+
+<script src="exif.js"></script>
+<script>
+(function(){
+"use strict";
+const $ = id => document.getElementById(id);
+const file = $("file");
+let lastReport = "";
+
+/* Each button configures the same input differently, then clicks it. The
+   attributes are the whole experiment, so they are set immediately before
+   opening rather than once at load. */
+function open_(accept, capture){
+  file.setAttribute("accept", accept);
+  if(capture) file.setAttribute("capture", capture);
+  else file.removeAttribute("capture");
+  file.value = "";
+  file.click();
+}
+$("camJpeg").onclick = () => open_("image/jpeg", "environment");
+$("camAny").onclick  = () => open_("image/*", "environment");
+$("libJpeg").onclick = () => open_("image/jpeg", null);
+$("libAny").onclick  = () => open_("image/*", null);
+
+const pad = (s,n) => String(s) + " ".repeat(Math.max(0, n - String(s).length));
+
+async function decodedSize(f){
+  try{
+    if(!window.createImageBitmap) return "createImageBitmap unavailable";
+    const b = await createImageBitmap(f);
+    const s = b.width + "x" + b.height;
+    if(b.close) b.close();
+    return s;
+  }catch(e){ return "would not decode (" + e.name + ")"; }
+}
+
+function verdict(rep, f35){
+  const v = $("verdict");
+  if(f35 != null){
+    v.className = "verdict on good";
+    v.innerHTML = "<p><b>Focal length found: " + f35 + " mm.</b> This path works — "
+      + "the main tool will read this file.</p>";
+    return;
+  }
+  v.className = "verdict on bad";
+  let why, fix;
+  if(rep.container.indexOf("ISOBMFF") === 0){
+    why = "iOS handed over the original HEIC instead of transcoding to JPEG.";
+    fix = "The EXIF parser is JPEG-only, so the tag is unreachable here even though it "
+        + "probably exists inside the file. Try the other buttons — if one returns a JPEG, "
+        + "that is the path to use.";
+  } else if(rep.container !== "JPEG"){
+    why = "This is not a JPEG (" + rep.container + ").";
+    fix = "Only JPEG carries metadata this can read.";
+  } else if(rep.exifAt < 0){
+    why = "It is a JPEG, but carries no Exif APP1 segment at all.";
+    fix = "The metadata was never written or was stripped on the way in. Nothing in the "
+        + "page can recover it — shoot in the Camera app and pick from the library instead, "
+        + "or enter the focal length once and save it for this camera.";
+  } else {
+    const sub = rep.ifds.find(i => i.name.indexOf("sub-IFD") >= 0);
+    const focal = sub && sub.entries.find(e => e.tag === 0x920A);
+    why = "Exif is present, but FocalLengthIn35mmFilm (0xA405) is not in it.";
+    fix = focal
+      ? "FocalLength did survive (" + focal.value + " mm). The 35mm equivalent can be "
+      + "reconstructed from that plus this device's crop factor — worth telling me."
+      : "Neither focal-length tag survived, so there is nothing to reconstruct from.";
+  }
+  v.innerHTML = "<p><b>No usable focal length.</b> " + why + "</p><p>" + fix + "</p>";
+}
+
+function render(f, rep, decoded){
+  const L = [];
+  L.push("=== Screen Sextant EXIF probe ===");
+  L.push("");
+  L.push("Requested   accept=" + (file.getAttribute("accept") || "(none)")
+         + "  capture=" + (file.getAttribute("capture") || "(none)"));
+  L.push("File name   " + (f.name || "(none)"));
+  L.push("MIME type   " + (f.type || "(none)"));
+  L.push("Size        " + f.size + " bytes");
+  L.push("Container   " + rep.container);
+  L.push("Decoded     " + decoded);
+  L.push("Exif APP1   " + (rep.exifAt >= 0 ? "yes, TIFF header at byte " + rep.exifAt
+                                           : "NOT PRESENT"));
+  if(rep.byteOrder) L.push("Byte order  " + rep.byteOrder);
+  if(rep.note)      L.push("Note        " + rep.note);
+
+  L.push("");
+  L.push("--- JPEG segments ---");
+  if(!rep.segments.length) L.push("(none: not a JPEG)");
+  for(const s of rep.segments)
+    L.push("  " + pad(s.marker, 16) + " at " + pad(s.at, 8)
+           + (s.length ? "len " + pad(s.length, 7) : pad("", 11))
+           + (s.id ? '"' + s.id + '"' : ""));
+
+  for(const ifd of rep.ifds){
+    L.push("");
+    L.push("--- " + ifd.name + " (" + ifd.entries.length + " entries) ---");
+    if(!ifd.entries.length) L.push("  (empty)");
+    for(const e of ifd.entries){
+      const hex = "0x" + e.tag.toString(16).toUpperCase().padStart(4,"0");
+      L.push("  " + pad(hex, 8) + pad(e.name, 28)
+             + pad(e.typeName + "[" + e.count + "]", 16)
+             + (e.value === null ? "(unreadable)" : e.value));
+    }
+  }
+
+  const wanted = [["FocalLengthIn35mmFilm", 0xA405], ["FocalLength", 0x920A],
+                  ["Make", 0x010F], ["Model", 0x0110],
+                  ["DigitalZoomRatio", 0xA404], ["PixelXDimension", 0xA002]];
+  L.push("");
+  L.push("--- tags this tool uses ---");
+  for(const [name, id] of wanted){
+    let found = null;
+    for(const ifd of rep.ifds){
+      const hit = ifd.entries.find(e => e.tag === id);
+      if(hit){ found = hit.value; break; }
+    }
+    L.push("  " + pad(name, 24) + (found === null || found === undefined
+      ? "MISSING" : found));
+  }
+  return L.join("\n");
+}
+
+file.onchange = async e => {
+  const f = e.target.files && e.target.files[0];
+  if(!f) return;
+  $("out").innerHTML = '<p class="hint">Reading…</p>';
+  let rep, buf = null;
+  try{
+    buf = await f.arrayBuffer();
+    rep = SA_EXIF.dump(buf);
+  }catch(err){
+    $("out").innerHTML = '<pre>Could not read the file: ' + err.message + '</pre>';
+    return;
+  }
+  const decoded = await decodedSize(f);
+  const parsed = SA_EXIF.parse(buf);
+  lastReport = render(f, rep, decoded);
+
+  const pre = document.createElement("pre");
+  pre.textContent = lastReport;
+  $("out").innerHTML = "";
+  $("out").appendChild(pre);
+  $("actions").style.display = "flex";
+  $("copied").textContent = "";
+  verdict(rep, SA_EXIF.plausibleF35(parsed.f35) ? parsed.f35 : null);
+  $("verdict").scrollIntoView({behavior:"smooth", block:"center"});
+};
+
+$("copy").onclick = async () => {
+  try{
+    await navigator.clipboard.writeText(lastReport);
+    $("copied").textContent = "copied";
+  }catch(e){
+    $("copied").textContent = "select the text above and copy manually";
+  }
+};
+})();
+</script>
+</body>
+</html>

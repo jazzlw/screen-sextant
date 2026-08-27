@@ -114,7 +114,7 @@ axis and overreads otherwise — 4% at 600 px off center.
 | Source | Magnitude | Mitigation |
 |---|---|---|
 | EXIF `f₃₅` is a rounded nominal value | 1–2% | Self-calibrate (below) |
-| Missing `f₃₅` | unbounded | *No reading is given* — angles scale directly with it, so a guess would be a confident wrong answer |
+| Missing `f₃₅` | unbounded | *No reading is given* — angles scale directly with it, so a guess would be a confident wrong answer. Supply it once and save it as a fallback |
 | Silent digital zoom crop | up to 100% | Flagged from EXIF when tagged; don't pinch-zoom |
 | Residual barrel distortion, ultrawide | ~1% off-axis | Keep target near center |
 | Off-centreline seat (keystone) | 13% on aspect at 20° | *corrected* — rectified, not assumed away |
@@ -215,6 +215,8 @@ geom.js      pure geometry -- pinhole model, rotated rect, convex hull,
 exif.js      JPEG APP1 -> TIFF -> IFD0 -> Exif sub-IFD. Pure, fully tested.
 index.html   design tokens, markup, and one IIFE of glue: detection,
              canvas rendering, handle editing, the calibration store.
+probe.html   diagnostics: dumps every tag a file carries, and which
+             file-input configuration produced it.
 sw.js        cache-first precache so it launches in a dead zone.
 ```
 
@@ -234,6 +236,7 @@ State is a handful of module-level globals (`img`, `W`, `H`, `f35`, `quad`).
 ```
 ./run-tests.sh          headless, via the jsc that ships inside macOS
 tests.html              the same assertions, in a browser
+probe.html              what a real file on a real device actually contains
 ```
 
 `tests.js` covers `geom.js` and `exif.js` directly: synthesize a screen of known
@@ -249,6 +252,38 @@ before assuming the app broke.
 
 A limitation we've measured but not fixed is reported as `known` rather than
 asserted, so it never goes green and never fails the run.
+
+---
+
+## Diagnosing a missing focal length
+
+`probe.html` exists because "no focal length" has three unrelated causes that
+look identical from the readout, and guessing between them wasted time:
+
+1. **Not a JPEG.** iOS handed over the original HEIC without transcoding. The
+   tag is probably in the file, but the parser is JPEG-only, so it's unreachable.
+2. **JPEG with no Exif APP1 at all.** The metadata was never written, or was
+   stripped in whatever path produced the file. Unrecoverable in the page.
+3. **Exif present, `0xA405` absent.** The camera wrote metadata but not the 35mm
+   equivalent. If `FocalLength` (`0x920A`) survived, the equivalent can be
+   reconstructed from it plus a per-device crop factor.
+
+The probe reports the container, every JPEG marker segment, every IFD entry
+named and typed, and a summary of just the tags this tool uses. It offers the
+same file input under four configurations — camera vs library, `image/jpeg` vs
+`image/*` — because those two variables are the whole experiment: run all four
+on the same scene and the failing combination identifies itself.
+
+### Focal-length precedence
+
+```
+saved per-device calibration  >  EXIF  >  saved fallback  >  no reading
+```
+
+The fallback is a value you supplied and chose to keep, for files that carry no
+focal length. It is labelled *your saved default*, never *from EXIF* — the
+provenance of that number is the difference between a measurement and a guess,
+and the readout says which one you have.
 
 ---
 
