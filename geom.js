@@ -350,7 +350,12 @@ function centerDistance(realWidth, rec){
    -------------------------------------------------------------------------- */
 
 /* Total-least-squares line fit: the principal axis of the point set. Ordinary
-   least squares would fail on the near-vertical sides. */
+   least squares would fail on the near-vertical sides.
+
+   Returns the RMS perpendicular residual alongside the line. That number is
+   what says whether the points describe a straight edge at all: fed the ragged
+   boundary of a dark patch of picture content, the fit still returns a line,
+   and without the residual there is no way to tell that line from a real one. */
 function fitLine(pts){
   const n = pts.length;
   if(n < 8) return null;
@@ -370,7 +375,13 @@ function fitLine(pts){
   else { dx=0; dy=1; }
   const len = Math.hypot(dx,dy);
   if(len < 1e-12) return null;
-  return {px:mx, py:my, dx:dx/len, dy:dy/len};
+  const ux = dx/len, uy = dy/len;
+  let se = 0;
+  for(const p of pts){
+    const perp = (p[0]-mx)*(-uy) + (p[1]-my)*ux;
+    se += perp*perp;
+  }
+  return {px:mx, py:my, dx:ux, dy:uy, rms:Math.sqrt(se/n), n:n};
 }
 
 function intersectLines(a,b){
@@ -389,24 +400,57 @@ function refineQuad(pts, r){
   const hw=r.w/2, hh=r.h/2;
   if(!(hw>0) || !(hh>0)) return null;
 
-  // assign each boundary point to its nearest side, skipping the corner
-  // regions where two sides compete for the same points
+  /* Take the outer silhouette, not every boundary pixel.
+
+     A screen showing real content is not a solid blob: dark passages in the
+     picture punch holes in the mask, and the edges of those holes are
+     boundary pixels too. Measured on a living-room photo, 22% of them were
+     interior, and feeding them to the line fits drags the sides inward.
+     For each position along a side, only the most extreme point can be part
+     of that side, so keeping just the extremum discards holes by
+     construction. */
   const SKIP = 0.18;
-  const groups = [[],[],[],[]];                    // top, right, bottom, left
+  const BAND = 0.30;                                 // how far a side may slant in
+  const ext = [new Map(), new Map(), new Map(), new Map()];   // top,right,bottom,left
+  const keep = (m, key, val, p, wantMax) => {
+    const cur = m.get(key);
+    if(!cur || (wantMax ? val > cur.v : val < cur.v)) m.set(key, {v:val, p:p});
+  };
   for(const p of pts){
     const [u,v] = toLocal(r, p[0], p[1]);
     const du = Math.abs(Math.abs(u)-hw), dv = Math.abs(Math.abs(v)-hh);
+    /* Assign to the nearest side first, then take the extremum within that
+       assignment. Taking the extremum globally instead would be wrong for a
+       trapezoid: the far edge is shorter than the near one, so for rows it
+       does not span, points from the top and bottom edges would win the
+       "leftmost" slot and drag the fit across the shape. */
     if(dv < du){
       if(Math.abs(u) > hw*(1-SKIP)) continue;
-      groups[v < 0 ? 0 : 2].push(p);
+      const side = v < 0 ? 0 : 2;
+      // must also lie in a band along that side of the rect: the extremum
+      // rule alone relies on every bucket holding an outer point, which dense
+      // pixel data gives but sparse input does not
+      if(Math.abs(v) < hh - BAND*r.h) continue;
+      keep(ext[side], Math.round(u), v, p, side === 2);
     } else {
       if(Math.abs(v) > hh*(1-SKIP)) continue;
-      groups[u > 0 ? 1 : 3].push(p);
+      const side = u > 0 ? 1 : 3;
+      if(Math.abs(u) < hw - BAND*r.w) continue;
+      keep(ext[side], Math.round(v), u, p, side === 1);
     }
   }
+  const groups = ext.map(m => Array.from(m.values(), e => e.p));
 
   const L = groups.map(fitLine);
   if(L.some(l => !l)) return null;
+
+  /* A side whose points scatter is not an edge. This is the check that
+     matters: without it the refinement happily fits a line to the boundary of
+     a dark region of picture content and reports it as the screen's edge,
+     turning a serviceable rectangle into a badly skewed quad. */
+  const span = Math.hypot(r.w, r.h);
+  for(let i=0;i<4;i++)
+    if(L[i].rms > 0.012*span) return null;
   const quad = [intersectLines(L[0],L[3]), intersectLines(L[0],L[1]),
                 intersectLines(L[2],L[1]), intersectLines(L[2],L[3])];
   if(quad.some(q => !q)) return null;

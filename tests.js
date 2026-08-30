@@ -370,6 +370,85 @@ t("refineQuad recovers a keystoned quad from its boundary points", () => {
   return out.join("   ");
 });
 
+t("refineQuad ignores the boundaries of holes in the mask", () => {
+  // A screen showing real content is not a solid blob: dark passages punch
+  // holes, whose edges are boundary pixels too. Measured on a living-room
+  // photo, 22% of the boundary points were interior. They must not pull the
+  // sides inward.
+  const quad = stageScreen(45,45/2.39,96,10*Math.PI/180,0)
+                 .map(p=>project3(p,RSET.W,RSET.H,RF));
+  const pts=[];
+  for(let e=0;e<4;e++){
+    const a=quad[e], b=quad[(e+1)%4];
+    const n=Math.ceil(Math.hypot(b[0]-a[0], b[1]-a[1]));   // one point per pixel
+    for(let i=0;i<=n;i++){
+      const s=i/n;
+      pts.push([a[0]+(b[0]-a[0])*s, a[1]+(b[1]-a[1])*s]);
+    }
+  }
+  const clean = SA.refineQuad(pts, SA.minAreaRect(pts));
+  ok(clean, "setup: the clean outline should refine");
+
+  // now add three interior holes, well inside the quad
+  const c = SA.quadCentroid(quad);
+  const holed = pts.slice();
+  for(const [ox,oy,rad] of [[0,0,180],[-300,80,120],[260,-60,90]])
+    for(let i=0;i<160;i++){
+      const th=i/160*Math.PI*2;
+      holed.push([c[0]+ox+rad*Math.cos(th), c[1]+oy+rad*0.6*Math.sin(th)]);
+    }
+  const withHoles = SA.refineQuad(holed, SA.minAreaRect(holed));
+  ok(withHoles, "should still refine with holes present");
+  let worst=0;
+  for(let i=0;i<4;i++)
+    worst=Math.max(worst, Math.hypot(withHoles[i][0]-clean[i][0],
+                                     withHoles[i][1]-clean[i][1]));
+  ok(worst < 2, "holes shifted the corners by " + fmt(worst) + "px");
+  return "3 interior holes, 480 extra boundary points, corners moved " + fmt(worst) + "px";
+});
+
+t("refineQuad declines when a side is not actually a straight edge", () => {
+  /* The real failure, reproduced. A living-room screen showing dark content
+     at one edge produces a component whose boundary there follows the
+     picture, not the screen. Fitting a line to it and calling it an edge
+     turned a serviceable rectangle (aspect 0.60) into a quad reading aspect
+     0.36 at 50 degrees of obliquity with a 12.8 degree skew -- confidently
+     wrong, where declining leaves a usable answer. */
+  const quad = stageScreen(45,45/2.39,96,0,0).map(p=>project3(p,RSET.W,RSET.H,RF));
+  const pts=[];
+  for(let e=0;e<4;e++){
+    const a=quad[e], b=quad[(e+1)%4];
+    for(let i=0;i<=200;i++){
+      const s=i/200;
+      // bite a ragged chunk out of the bottom edge, as dark content does
+      if(e===2 && s>0.25 && s<0.8){
+        const bite=90+70*Math.sin(s*37);
+        pts.push([a[0]+(b[0]-a[0])*s, a[1]+(b[1]-a[1])*s - bite]);
+      } else {
+        pts.push([a[0]+(b[0]-a[0])*s, a[1]+(b[1]-a[1])*s]);
+      }
+    }
+  }
+  const r = SA.minAreaRect(pts);
+  ok(r, "the rect should still fit");
+  ok(SA.refineQuad(pts, r) === null,
+     "a ragged side must be rejected, not fitted");
+  return "ragged edge rejected; the rectangle stands";
+});
+
+t("fitLine reports the residual that makes rejection possible", () => {
+  const straight=[], ragged=[];
+  for(let i=0;i<80;i++){
+    straight.push([i*3, 200]);
+    ragged.push([i*3, 200 + (i%7)*11 - 33]);
+  }
+  const a = SA.fitLine(straight), b = SA.fitLine(ragged);
+  near(a.rms, 0, 1e-9, "a straight line has no residual");
+  ok(b.rms > 8, "a ragged one should, got " + fmt(b.rms));
+  ok(a.n === 80 && b.n === 80, "point counts reported");
+  return "straight rms " + fmt(a.rms) + " vs ragged " + fmt(b.rms);
+});
+
 t("refineQuad declines rather than returning a worse fit", () => {
   ok(SA.refineQuad([], null) === null, "no rect");
   ok(SA.refineQuad([[0,0]], {cx:0,cy:0,w:10,h:10,t:0}) === null, "too few points");

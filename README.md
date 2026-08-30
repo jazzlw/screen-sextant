@@ -197,6 +197,59 @@ blind spot worth knowing: under pure yaw, with one pair of edges still parallel
 in the image, symmetry pins the skew to zero for any focal length. It only
 bites when both pairs converge.
 
+### Where auto-detection fails, measured
+
+Otsu plus largest-connected-component assumes the screen is the only bright
+thing in a dark room. In a living room it isn't. Measured on a real photo of a
+wall-mounted screen (520×390 working size, the detector's own downscale):
+
+```
+screen interior : p1=46  p5=64  p25=131  p50=170
+surrounding wall: p50=40 p75=48  p95=64   p99=159
+```
+
+The screen's 5th percentile and the wall's 95th are **the same number**. The
+distributions overlap, so no threshold separates them:
+
+| threshold | screen lost | wall leaked |
+|---|---|---|
+| 48 | 1.6% | 23.9% |
+| 64 *(best possible)* | 5.0% | 4.7% |
+| 104 *(Otsu's choice)* | 18.8% | 1.4% |
+| 136 | 26.4% | 1.2% |
+
+Otsu lands at 104 because the histogram is dominated by the dark room, and
+there loses nearly a fifth of the screen — wherever the picture itself is dark.
+Turning the threshold down trades that for wall spill, lit by the screen. This
+is why the slider doesn't rescue it: **it is not an exposure problem.** Three
+things break the assumption at once — the screen's own content spans the full
+range down into the wall's, the wall is lit by the screen, and other bright
+objects compete.
+
+The consequence is that the mask's boundary is partly *picture content* rather
+than the screen's edge, and 22% of the boundary points were interior hole
+edges. `refineQuad` fitted lines to those and reported them as screen edges,
+turning a serviceable rectangle into a confidently wrong quad:
+
+| | before | after |
+|---|---|---|
+| aspect | 0.355 | 0.601 |
+| obliquity | 50.1° | 5.1° |
+| skew | 12.78° | 0.00° |
+
+Two changes. Each side now takes only the *outer silhouette* within its
+nearest-side assignment, so hole boundaries cannot pull a side inward. And
+`fitLine` returns its RMS residual, which is the check that matters: a side
+whose points scatter is not an edge, and the refinement is refused rather than
+believed. The minimum-area rectangle then stands, which on this photo is within
+about 2% of the truth.
+
+What remains is the harder half: the mask under-reaches wherever the screen's
+own content is dark, so even the rectangle is slightly small. Fixing that needs
+the screen's *edge* rather than its lit area — a gradient search perpendicular
+to each side of the initial rectangle would find the real discontinuity between
+picture and wall. That is the next real improvement, and it is listed below.
+
 **It detects the projected image, not the physical screen.** With masking closed
 on a scope feature you'll read 2.39:1 — which is the honest answer for what
 you're actually watching. The nearest-standard-ratio readout is a useful sanity
@@ -494,6 +547,14 @@ To regenerate icons after editing the glyph: `python3 tools/make-icons.py`.
       spec requires. iOS does; a vendor that doesn't would reintroduce the
       error the budget used to claim, and nothing in a single file
       distinguishes the two cases.
+- [ ] **Snap each side to the strongest gradient.** The current fit is
+      photometric: it thresholds brightness and fits the lit blob. A screen
+      showing dark content at one edge therefore reads slightly small, and no
+      threshold recovers it, because a black patch of picture and a black bezel
+      are the same pixels. The screen's edge is a real luminance
+      discontinuity though — searching perpendicular to each side of the
+      initial rectangle for the maximum gradient would find it regardless of
+      what is being shown. This subsumes the sub-pixel item below.
 - [ ] Optional: sub-pixel edge refinement (fit an intensity ramp across each
       edge rather than taking the threshold crossing). Probably below the
       focal-length error floor, so low priority.
