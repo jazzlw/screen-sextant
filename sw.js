@@ -6,7 +6,7 @@
 
    Cache-first means a deploy is invisible until CACHE changes, so bump the
    version on every release -- the activate handler deletes the older caches. */
-const CACHE = "screen-sextant-v3";
+const CACHE = "screen-sextant-v4";
 
 /* Relative paths throughout: this ships on GitHub Pages under a project
    subpath, where a leading "/" would resolve to the user root and 404. */
@@ -15,6 +15,7 @@ const ASSETS = [
   "./index.html",
   "./geom.js",
   "./exif.js",
+  "./lenses.js",
   "./probe.html",
   "./manifest.webmanifest",
   "./icon-192.png",

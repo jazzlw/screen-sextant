@@ -309,13 +309,36 @@ function cropFactor(x){
   return x.f35 / x.focal;
 }
 
-/* Stable key for caching a calibrated f35: the lens is fixed per model, but
-   the pixel pitch changes with capture resolution, so both matter. */
+/* Stable key for caching a calibrated f35.
+
+   The lens matters as much as the body, and this is easy to get wrong: a phone
+   carries several lenses differing by up to 10x in focal length, and they can
+   all produce the same pixel dimensions. Keying on make/model/resolution alone
+   would apply an ultra-wide calibration to a telephoto shot and label it
+   "calibrated". So the lens identity goes in the key, and the pixel count too,
+   since the pixel pitch changes with capture resolution even though the lens
+   does not.
+
+   Returns null when the file identifies neither body nor lens -- there is
+   nothing trustworthy to key on, and identifiable() is how callers know to
+   refuse to save. */
 function deviceKey(x, W, H){
-  const id = [x.make, x.model].filter(Boolean).join(" ") || "unknown";
-  return id + "@" + Math.max(W, H);
+  if(!identifiable(x)) return null;
+  const body = [x.make, x.model].filter(Boolean).join(" ") || "unknown body";
+  const lens = x.lens || (x.focal > 0 ? x.focal.toFixed(2) + "mm" : null);
+  return [body, lens].filter(Boolean).join(" / ") + "@" + Math.max(W, H);
 }
 
-return {parse, plausibleF35, zoomed, cropFactor, deviceKey, tag, findTiff,
+/* Can this file's camera and lens be pinned down well enough to cache a
+   calibration against? Needs the lens, one way or another: the body alone
+   does not determine the focal length. */
+function identifiable(x){
+  if(!x) return false;
+  const hasBody = !!(x.make || x.model);
+  const hasLens = !!(x.lens || (x.focal > 0));
+  return hasBody && hasLens;
+}
+
+return {parse, plausibleF35, zoomed, cropFactor, deviceKey, identifiable, tag, findTiff,
         dump, container, segments, tagName, markerName};
 })();

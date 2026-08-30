@@ -183,6 +183,7 @@ code{font:600 12px ui-monospace,Menlo,monospace;color:var(--ink)}
     <div class="primary">
       <div class="plabel">Horizontal subtense</div>
       <div class="pval" id="hAng" role="status" aria-live="polite">—<span>°</span></div>
+      <p class="pcap" id="tolNote" style="display:none"></p>
       <p class="pcap">Head-on equivalent — this seat&rsquo;s distance from the screen, moved round onto
         the centreline. Strips out both how the shot was framed and how far off-axis you&rsquo;re
         sitting, so it is comparable to the SMPTE and THX targets and to other rooms.</p>
@@ -221,7 +222,13 @@ code{font:600 12px ui-monospace,Menlo,monospace;color:var(--ink)}
         <input type="number" id="f35" min="8" max="300" step="0.1">
         <span class="flag" id="f35src">—</span>
         <button class="link" id="calib">save for this camera</button>
-        <button class="link" id="calibAny">use when file has none</button>
+      </div>
+      <div class="row" id="lensRow">
+        <label for="lensPreset">Lens</label>
+        <select id="lensPreset" aria-label="Lens, when the file carries no focal length">
+          <option value="">— not set —</option>
+        </select>
+        <button class="link" id="rememberLens">remember for files with none</button>
       </div>
       <div class="row" id="calibRow" style="display:none">
         <span class="hint" style="margin:0" id="calibNote"></span>
@@ -256,6 +263,7 @@ code{font:600 12px ui-monospace,Menlo,monospace;color:var(--ink)}
 
 <script src="geom.js"></script>
 <script src="exif.js"></script>
+<script src="lenses.js"></script>
 <script>
 /* Register the offline cache. isSecureContext rather than a protocol check, so
    localhost during development counts and file:// quietly does not. */
@@ -277,13 +285,18 @@ let drag=null;           // index into handles() while pointer-dragging
 let sel=0;               // selected handle for keyboard editing
 let meta=null;           // parsed EXIF
 let devKey=null;
+let f35kind="unknown";   // provenance of f35: exif | cal | preset | manual | unknown
+let f35preset=null;      // preset id, when f35kind is "preset"
 
-const CAL_KEY="screenangle.cal.v1";
+/* v2: keys now include the lens. v1 keys were body+resolution only, which
+   would cross-apply an ultra-wide calibration to a telephoto shot, so they are
+   deliberately abandoned rather than migrated. */
+const CAL_KEY="screenangle.cal.v2";
 /* Reserved key inside the calibration store for "use this whenever the file
    carries no focal length". Distinct from a per-device calibration: it is a
    deliberate user-supplied fallback, not a measurement of a known camera, and
    it is labelled that way in the readout so it never passes for EXIF. */
-const FALLBACK_KEY="*";
+const LENS_KEY="*lens";      // remembered preset id for files with no focal length
 
 /* ---------------- calibration store --------------------------------------- */
 /* A self-calibrated f35 is good forever for that lens at that resolution, so
@@ -440,9 +453,8 @@ function update(){
     $("needF").className="banner on";
     $("needF").innerHTML="<strong>No focal length in this file.</strong> Angles scale directly "+
       "with it, so nothing is reported until it is known. Enter the 35mm-equivalent below, "+
-      "then <em>use when file has none</em> to stop being asked \u2014 that saves your own "+
-      "number, not a guess. <a href=\"probe.html\" style=\"color:var(--bar-cyan)\">The EXIF "+
-      "probe</a> shows why the tag is missing.";
+      "or pick the lens you used. <a href=\"probe.html\" style=\"color:var(--bar-cyan)\">The "+
+      "EXIF probe</a> shows why the tag is missing.";
     return;
   }
   $("needF").className="banner";
@@ -456,7 +468,26 @@ function update(){
     return;
   }
 
-  $("hAng").innerHTML=a.h.toFixed(1)+"<span>\u00b0</span>";
+  /* Propagate the focal length's uncertainty into the reading, by evaluating
+     at both ends of its tolerance. An assumed lens must not be able to print
+     the same confident number a measured one does. */
+  const tol=SA_LENS.tolFor(f35kind,f35preset);
+  const tn=$("tolNote");
+  if(tol>=0.03){
+    const lo=SA.rectify(quad,W,H,f35*(1+tol));   // longer lens, smaller angle
+    const hi=SA.rectify(quad,W,H,f35*(1-tol));
+    const band=(lo.ok&&hi.ok) ? (hi.h-lo.h)/2 : 0;
+    $("hAng").innerHTML=a.h.toFixed(1)+"<span>\u00b0 \u00b1"+band.toFixed(1)+"\u00b0</span>";
+    const p=SA_LENS.byId(f35preset);
+    tn.style.display="";
+    tn.innerHTML="Range shown because the focal length is assumed, not measured"+
+      (p?" \u2014 <b style=\"color:var(--ink)\">"+p.label+"</b>, "+p.note:"")+
+      ". If that\u2019s the wrong lens the reading is wrong by far more than this band; "+
+      "calibrate against a known length to remove it.";
+  } else {
+    $("hAng").innerHTML=a.h.toFixed(1)+"<span>\u00b0</span>";
+    tn.style.display="none";
+  }
   $("vAng").textContent=a.v.toFixed(1)+"\u00b0";
   $("dAng").textContent=a.d.toFixed(1)+"\u00b0";
   const std=SA.nearestAR(a.ar);
@@ -534,6 +565,7 @@ function update(){
 
 function blankReadout(){
   $("hAng").innerHTML="\u2014<span>\u00b0</span>";
+  $("tolNote").style.display="none";
   for(const id of ["vAng","dAng","aspect","dist","roll","oblq"]) $(id).textContent="\u2014";
   $("needle").style.left="calc(0% - 1px)";
   $("needle").querySelector("b").textContent="\u2014";
@@ -645,38 +677,59 @@ function fail(msg){
   $("pick2").onclick=()=>$("file").click();
 }
 
-function setF35(v,kind){
+function setF35(v,kind,presetId){
   f35 = (v>0) ? v : null;
+  f35kind = f35 ? kind : "unknown";
+  f35preset = (f35kind === "preset") ? (presetId||null) : null;
   $("f35").value = f35 ? Math.round(f35*100)/100 : "";
   $("f35src").textContent =
-    {exif:"from EXIF", cal:"calibrated", fallback:"your saved default",
-     unknown:"not in file — enter it", manual:"manual"}[kind];
+    {exif:"from EXIF", cal:"calibrated", preset:"assumed lens",
+     unknown:"not in file — enter it", manual:"manual"}[f35kind];
   $("f35src").className = "flag " +
-    {exif:"ok", cal:"cal", fallback:"cal", unknown:"warn", manual:""}[kind];
+    {exif:"ok", cal:"cal", preset:"warn", unknown:"warn", manual:""}[f35kind];
+  $("lensPreset").value = f35preset || "";
+}
+
+/* Choose f35 for a freshly loaded file. Order matters and is deliberate:
+   a calibration is a measurement of this exact lens, EXIF is the camera's own
+   rounded figure, a preset is a guess the user confirmed, and nothing at all
+   is better than any of the ways of inventing one. */
+function chooseF35(){
+  const st = calRead();
+  if(devKey && st[devKey] != null)              return setF35(st[devKey], "cal");
+  if(meta && SA_EXIF.plausibleF35(meta.f35))    return setF35(meta.f35, "exif");
+  const p = SA_LENS.byId(st[LENS_KEY]);
+  if(p)                                         return setF35(p.f35, "preset", p.id);
+  setF35(null, "unknown");
 }
 
 function showCalState(){
   const store=calRead();
-  const dev=devKey && store[devKey]!=null ? store[devKey] : null;
-  const fb=store[FALLBACK_KEY]!=null ? store[FALLBACK_KEY] : null;
-  $("calibRow").style.display=(dev!=null||fb!=null)?"flex":"none";
+  const dev = devKey && store[devKey]!=null ? store[devKey] : null;
+  const remembered = SA_LENS.byId(store[LENS_KEY]);
   const bits=[];
-  if(dev!=null) bits.push("Saved <b>"+dev+" mm</b> for <code>"+devKey+
+
+  if(dev!=null) bits.push("Calibrated <b>"+dev+" mm</b> for <code>"+devKey+
     "</code> \u2014 <button class=\"link\" id=\"forget\">forget</button>");
-  if(fb!=null) bits.push("Fallback for files with no focal length: <b>"+fb+
-    " mm</b> \u2014 <button class=\"link\" id=\"forgetFb\">forget</button>");
-  $("calibNote").innerHTML=bits.join("<br>");
-  const reset=()=>{
-    showCalState();
-    const st=calRead();
-    if(devKey && st[devKey]!=null)               setF35(st[devKey],"cal");
-    else if(meta && SA_EXIF.plausibleF35(meta.f35)) setF35(meta.f35,"exif");
-    else if(st[FALLBACK_KEY]!=null)              setF35(st[FALLBACK_KEY],"fallback");
-    else                                         setF35(null,"unknown");
-    update();
-  };
-  if($("forget"))   $("forget").onclick=()=>{ const st=calRead(); delete st[devKey]; calWrite(st); reset(); };
-  if($("forgetFb")) $("forgetFb").onclick=()=>{ const st=calRead(); delete st[FALLBACK_KEY]; calWrite(st); reset(); };
+  if(remembered) bits.push("When a file carries no focal length, assuming <b>"+
+    remembered.label+"</b> ("+remembered.f35+" mm) \u2014 "+
+    "<button class=\"link\" id=\"forgetLens\">forget</button>");
+
+  /* A calibration can only be cached against a file that identifies its lens.
+     Without that there is nothing to key on, and a saved value would be
+     re-applied to a different lens later wearing a "calibrated" badge. */
+  const canSave = !!devKey && f35>0;
+  $("calib").style.display = canSave ? "" : "none";
+  if(!canSave && f35>0 && img)
+    bits.push("This file doesn\u2019t identify its lens, so a calibration can\u2019t be "+
+      "pinned to it \u2014 use the lens setting instead.");
+
+  $("calibRow").style.display = bits.length ? "flex" : "none";
+  $("calibNote").innerHTML = bits.join("<br>");
+
+  const reset=()=>{ showCalState(); chooseF35(); update(); };
+  if($("forget"))     $("forget").onclick=()=>{ const st=calRead(); delete st[devKey]; calWrite(st); reset(); };
+  if($("forgetLens")) $("forgetLens").onclick=()=>{ const st=calRead(); delete st[LENS_KEY]; calWrite(st); reset(); };
 }
 
 async function load(file){
@@ -699,10 +752,7 @@ async function load(file){
   meta=meta||{};
   devKey=SA_EXIF.deviceKey(meta,W,H);
   const store=calRead();
-  if(store[devKey]!=null)                       setF35(store[devKey],"cal");
-  else if(SA_EXIF.plausibleF35(meta.f35))       setF35(meta.f35,"exif");
-  else if(store[FALLBACK_KEY]!=null)            setF35(store[FALLBACK_KEY],"fallback");
-  else                                          setF35(null,"unknown");
+  chooseF35();
   showCalState();
 
   // digital zoom is the one error big enough to invalidate the reading outright
@@ -768,16 +818,48 @@ $("newphoto").onclick=()=>{
 
 $("f35").oninput=e=>{
   const v=parseFloat(e.target.value);
+  // typed by hand, so it is neither EXIF nor a preset any more
   f35 = v>0 ? v : null;
+  f35kind = f35 ? "manual" : "unknown";
+  f35preset = null;
+  $("lensPreset").value = "";
   $("f35src").textContent = f35 ? "manual" : "not in file — enter it";
   $("f35src").className = "flag" + (f35 ? "" : " warn");
+  showCalState();
   update();
 };
-$("calibAny").onclick=()=>{
-  if(!(f35>0)) return;
+
+/* Populate the lens picker from the table, grouped. */
+(function(){
+  const sel=$("lensPreset");
+  for(const g of SA_LENS.groups()){
+    const og=document.createElement("optgroup");
+    og.label=g;
+    for(const p of SA_LENS.PRESETS){
+      if(p.group!==g) continue;
+      const o=document.createElement("option");
+      o.value=p.id;
+      o.textContent=p.label+"  ("+p.f35+" mm)";
+      o.title=p.note;
+      og.appendChild(o);
+    }
+    sel.appendChild(og);
+  }
+})();
+
+$("lensPreset").onchange=e=>{
+  const p=SA_LENS.byId(e.target.value);
+  if(p) setF35(p.f35,"preset",p.id);
+  else  chooseF35();
+  showCalState();
+  update();
+};
+$("rememberLens").onclick=()=>{
+  const p=SA_LENS.byId($("lensPreset").value);
+  if(!p) return;
   const st=calRead();
-  st[FALLBACK_KEY]=Math.round(f35*100)/100;
-  if(calWrite(st)){ setF35(st[FALLBACK_KEY],"fallback"); showCalState(); update(); }
+  st[LENS_KEY]=p.id;
+  if(calWrite(st)) showCalState();
 };
 $("calib").onclick=()=>{
   if(!img||!devKey||!(f35>0)) return;

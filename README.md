@@ -212,7 +212,10 @@ Four files, no build step, no dependencies.
 geom.js      pure geometry -- pinhole model, rotated rect, convex hull,
              rotating calipers, single-view rectification. No DOM, no
              state, fully tested.
-exif.js      JPEG APP1 -> TIFF -> IFD0 -> Exif sub-IFD. Pure, fully tested.
+exif.js      JPEG APP1 -> TIFF -> IFD0 -> Exif sub-IFD, plus the
+             diagnostics probe.html renders. Pure, fully tested.
+lenses.js    nominal focal lengths by lens type, each with a tolerance.
+             Data, not measurement -- see Focal-length precedence.
 index.html   design tokens, markup, and one IIFE of glue: detection,
              canvas rendering, handle editing, the calibration store.
 probe.html   diagnostics: dumps every tag a file carries, and which
@@ -277,13 +280,41 @@ on the same scene and the failing combination identifies itself.
 ### Focal-length precedence
 
 ```
-saved per-device calibration  >  EXIF  >  saved fallback  >  no reading
+per-lens calibration  >  EXIF  >  remembered lens preset  >  no reading
 ```
 
-The fallback is a value you supplied and chose to keep, for files that carry no
-focal length. It is labelled *your saved default*, never *from EXIF* — the
-provenance of that number is the difference between a measurement and a guess,
-and the readout says which one you have.
+Every angle is directly proportional to `f₃₅`, so where that number came from
+matters as much as its value. Each source carries a tolerance, and when it is
+large enough to matter the primary reading prints as a range rather than a
+point:
+
+| Source | Tolerance | Reads as |
+|---|---|---|
+| Calibrated against a known length | 0.5% | `38.4°` |
+| EXIF | 2% | `38.4°` |
+| Lens preset | 4–6% | `38.4° ±1.6°` |
+| Typed by hand | your call | `38.4°` |
+
+**A preset is a guess you confirmed, so it never prints like a measurement.**
+It is labelled *assumed lens*, the assumed lens is named in full next to the
+reading, and the note says plainly that picking the wrong lens is an error the
+band does not cover — because it isn't a tolerance, it's a different lens.
+
+### Why the calibration key includes the lens
+
+A phone carries several lenses — roughly 13, 24, 48, 77 and 120 mm equivalent
+on a recent iPhone — and **they all shoot the same pixel dimensions.** A key of
+make/model/resolution would therefore apply an ultra-wide calibration to a
+telephoto shot and label the result *calibrated*: a 3× error wearing a badge of
+confidence. The lens goes in the key, identified by `LensModel` or by the raw
+`FocalLength` tag.
+
+The corollary is that a file which identifies no lens cannot be calibrated
+against at all — there is nothing trustworthy to key on, so the tool withdraws
+the option and says why, rather than saving something it would misapply later.
+That is the case that pushed the lens presets into existence: a
+metadata-stripped camera capture can be given a lens by name, which is a claim
+the user can check, where a bare remembered number is not.
 
 ---
 

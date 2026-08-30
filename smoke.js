@@ -73,6 +73,7 @@ globalThis.scrollTo = () => {};
 /* ---- load the real modules and the extracted, hook-appended glue ---- */
 load("geom.js");
 load("exif.js");
+load("lenses.js");
 
 /* Pull the inline script out of index.html and give it test hooks. */
 const HTML = read("index.html");
@@ -81,6 +82,7 @@ if(!FOUND) throw new Error("no inline <script> found in index.html");
 const INLINE = FOUND[FOUND.length-1].replace(/^<script[^>]*>/, "").replace(/<\/script>$/, "");
 const HOOKS = `
 window.__t={update,handles,moveHandle,setF35,showCalState,calRead,calWrite,detect,defaultQuad,
+  chooseF35, getKind:()=>f35kind, getPreset:()=>f35preset,
   getQuad:()=>quad, setQuad:q=>{quad=q;}, setImg:i=>{img=i;}, setF:v=>{f35=v;},
   setDims:(w,h)=>{W=w;H=h;}, setMeta:(m,k)=>{meta=m;devKey=k;}};
 `;
@@ -253,53 +255,91 @@ check("calibration round-trips through storage and can be forgotten", () => {
   return $("calibNote").innerHTML.replace(/<[^>]+>/g,"");
 });
 
-check("a saved fallback fills in for files with no focal length", () => {
+check("a remembered lens fills in for files with no focal length", () => {
   STORE = {};
   t.setQuad(clone(SQUARE));
-  // no EXIF at all, as a stripped camera capture arrives
-  t.setMeta({make:null, model:null}, "unknown@4032");
-  t.setF35(null, "unknown");
+  t.setMeta({make:null, model:null}, null);   // stripped capture: nothing identifiable
+  t.chooseF35();
   t.update();
-  ok($("needF").className.indexOf("on") >= 0, "should prompt with nothing saved");
+  ok($("needF").className.indexOf("on") >= 0, "should prompt with nothing remembered");
 
-  // the user types their own measured value and saves it as the fallback
-  $("f35").value = "25.4";
-  $("f35").oninput({target:$("f35")});
-  $("calibAny").onclick();
-  ok(t.calRead()["*"] === 25.4, "fallback not persisted: " + JSON.stringify(t.calRead()));
-  ok($("f35src").textContent === "your saved default",
+  $("lensPreset").value = "main-26";
+  $("lensPreset").onchange({target:$("lensPreset")});
+  ok(t.getKind() === "preset", "kind was " + t.getKind());
+  ok($("f35").value === 26, "f35 should be the preset value, got " + $("f35").value);
+  ok($("f35src").textContent === "assumed lens",
      "provenance was '" + $("f35src").textContent + "'");
-  ok($("f35src").textContent !== "from EXIF", "a fallback must never read as EXIF");
-  ok($("needF").className.indexOf("on") < 0, "prompt should clear");
-  ok($("calibNote").innerHTML.indexOf("no focal length") > 0,
-     "note should explain what the fallback is: " + $("calibNote").innerHTML);
-  return "fallback applied and labelled distinctly from EXIF";
+  ok($("f35src").textContent !== "from EXIF", "an assumption must never read as EXIF");
+
+  $("rememberLens").onclick();
+  ok(t.calRead()["*lens"] === "main-26", "not remembered: " + JSON.stringify(t.calRead()));
+  t.chooseF35();
+  ok(t.getKind() === "preset" && t.getPreset() === "main-26", "should re-apply on the next file");
+  ok($("calibNote").innerHTML.indexOf("Phone main camera, 26 mm") > 0,
+     "the assumed lens must be named: " + $("calibNote").innerHTML);
+  STORE = {};
+  return "remembered, re-applied, and named every time";
 });
 
-check("real EXIF outranks a saved fallback", () => {
+check("an assumed focal length prints a range, a measured one does not", () => {
   STORE = {};
-  t.calWrite({"*": 25.4});
-  ok(t.calRead()["*"] === 25.4, "setup");
-  // a file that does carry the tag must use it, not the fallback
-  t.setF35(24, "exif");
-  ok($("f35src").textContent === "from EXIF", "EXIF should win");
-  ok($("f35").value === 24, "value should be the EXIF one");
-  STORE = {};
-  return "precedence: per-device calibration > EXIF > fallback > nothing";
+  t.setQuad(clone(SQUARE));
+  t.setMeta({make:"Apple", model:"iPhone", focal:6.86}, "Apple iPhone / 6.86mm@4032");
+
+  t.setF35(26, "exif");
+  t.update();
+  const exif = $("hAng").innerHTML;
+  ok(exif.indexOf("±") < 0, "EXIF should print a clean number, got " + exif);
+  ok($("tolNote").style.display === "none", "no tolerance note for EXIF");
+
+  t.setF35(26, "preset", "main-26");
+  t.update();
+  const preset = $("hAng").innerHTML;
+  ok(preset.indexOf("±") > 0, "a preset should print a range, got " + preset);
+  ok($("tolNote").style.display !== "none", "should explain why the range is there");
+  ok($("tolNote").innerHTML.indexOf("assumed, not measured") > 0,
+     "note was " + $("tolNote").innerHTML);
+  ok($("tolNote").innerHTML.indexOf("wrong lens") > 0,
+     "must warn that the wrong lens dwarfs the band");
+
+  // the band must straddle the point estimate and scale with the tolerance
+  const band = parseFloat(preset.match(/±([\d.]+)/)[1]);
+  ok(band > 0.5 && band < 4, "band of " + band + " deg looks wrong for 4% on 26deg");
+  t.setF35(26, "cal");
+  t.update();
+  ok($("hAng").innerHTML.indexOf("±") < 0, "a calibrated value should print clean");
+  return "exif " + exif.replace(/<[^>]+>/g," ") + " vs preset " + preset.replace(/<[^>]+>/g," ");
 });
 
-check("a fallback of zero or garbage is never saved", () => {
+check("a calibration cannot be saved against a file that hides its lens", () => {
   STORE = {};
-  for(const v of ["", "0", "-3", "abc"]){
-    $("f35").value = v;
-    $("f35").oninput({target:$("f35")});
-    $("calibAny").onclick();
-    ok(t.calRead()["*"] === undefined,
-       "saved a bad fallback from input " + JSON.stringify(v) + ": " + JSON.stringify(t.calRead()));
-  }
+  t.setQuad(clone(SQUARE));
+  t.setF35(26, "manual");
+  // identifiable file: saving is offered
+  t.setMeta({make:"Apple", model:"iPhone", focal:6.86}, "Apple iPhone / 6.86mm@4032");
+  t.showCalState();
+  ok($("calib").style.display !== "none", "should offer to save for an identified lens");
+  // unidentifiable file: saving is withdrawn and the reason given
+  t.setMeta({make:null, model:null}, null);
+  t.showCalState();
+  ok($("calib").style.display === "none", "must not offer to save with no lens identity");
+  ok($("calibNote").innerHTML.indexOf("doesn’t identify its lens") > 0,
+     "should say why: " + $("calibNote").innerHTML);
   STORE = {};
+  return "no calibration without a lens to pin it to";
+});
+
+check("typing a focal length clears any assumed-lens provenance", () => {
+  STORE = {};
+  t.setF35(26, "preset", "main-26");
+  ok(t.getKind() === "preset", "setup");
+  $("f35").value = "31";
+  $("f35").oninput({target:$("f35")});
+  ok(t.getKind() === "manual", "kind was " + t.getKind());
+  ok(t.getPreset() === null, "preset id should be cleared");
+  ok($("lensPreset").value === "", "the picker should no longer claim a lens");
   t.setF(26);
-  return "4 bad inputs, nothing persisted";
+  return "a typed number stops claiming to be a preset";
 });
 
 check("calRead survives storage being unavailable", () => {

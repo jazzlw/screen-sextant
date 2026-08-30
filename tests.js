@@ -777,12 +777,99 @@ t("cropFactor divides the two focal-length tags", () => {
 });
 
 t("deviceKey separates resolutions of the same camera", () => {
-  const a = SA_EXIF.deviceKey({make:"Apple",model:"iPhone 15 Pro"}, 4032, 3024);
-  const b = SA_EXIF.deviceKey({make:"Apple",model:"iPhone 15 Pro"}, 8064, 6048);
+  const base = {make:"Apple", model:"iPhone 15 Pro", focal:6.86};
+  const a = SA_EXIF.deviceKey(base, 4032, 3024);
+  const b = SA_EXIF.deviceKey(base, 8064, 6048);
   ok(a !== b, "pixel pitch changes with resolution, so the key must too");
-  ok(SA_EXIF.deviceKey({make:null,model:null}, 100, 50) === "unknown@100",
-     "unidentified device still gets a usable key");
   return a;
+});
+
+t("deviceKey separates the lenses of one phone", () => {
+  // The trap: a phone's lenses differ by up to 10x and all shoot the same
+  // pixel dimensions, so a body-only key would cross-apply calibrations.
+  const body = {make:"Apple", model:"iPhone 15 Pro"};
+  const keys = new Set();
+  for(const lens of [
+        {focal:2.22, lens:"iPhone 15 Pro back camera 2.22mm f/2.2"},
+        {focal:6.86, lens:"iPhone 15 Pro back camera 6.86mm f/1.78"},
+        {focal:15.66, lens:"iPhone 15 Pro back camera 15.66mm f/2.8"}]){
+    const k = SA_EXIF.deviceKey({...body, ...lens}, 4032, 3024);
+    ok(k, "should produce a key for " + lens.focal + "mm");
+    keys.add(k);
+  }
+  ok(keys.size === 3, "expected 3 distinct keys, got " + keys.size + ": " + [...keys]);
+  // the focal length alone is enough to separate them when LensModel is absent
+  const noName = new Set([2.22, 6.86, 15.66].map(f =>
+    SA_EXIF.deviceKey({...body, focal:f}, 4032, 3024)));
+  ok(noName.size === 3, "focal length alone should separate lenses: " + [...noName]);
+  return "ultra-wide, main and tele never share a key";
+});
+
+t("deviceKey refuses to key an unidentifiable file", () => {
+  // No lens information means nothing trustworthy to cache against: saving a
+  // calibration here would silently apply it to a different lens later.
+  ok(SA_EXIF.deviceKey({make:null, model:null}, 100, 50) === null, "nothing known");
+  ok(SA_EXIF.deviceKey({make:"Apple", model:"iPhone"}, 100, 50) === null,
+     "body without lens is not enough");
+  ok(SA_EXIF.deviceKey({focal:6.86}, 100, 50) === null, "lens without body is not enough");
+  ok(SA_EXIF.deviceKey({make:"Apple", model:"iPhone", focal:6.86}, 100, 50) !== null,
+     "body plus lens is enough");
+  return "null rather than a key that would cross-apply";
+});
+
+t("identifiable() agrees with deviceKey", () => {
+  const cases = [
+    [{}, false],
+    [{make:"Apple"}, false],
+    [{focal:6.86}, false],
+    [{make:"Apple", focal:6.86}, true],
+    [{model:"iPhone", lens:"main"}, true],
+    [{make:"Apple", model:"iPhone", focal:0}, false],
+  ];
+  for(const [x, want] of cases){
+    ok(SA_EXIF.identifiable(x) === want, JSON.stringify(x) + " -> expected " + want);
+    ok((SA_EXIF.deviceKey(x, 100, 50) !== null) === want,
+       JSON.stringify(x) + ": deviceKey and identifiable disagree");
+  }
+  return cases.length + " cases, the two functions never disagree";
+});
+
+/* ------------------------------ lens presets ------------------------------ */
+t("every lens preset is well formed and plausible", () => {
+  const ids = new Set();
+  for(const p of SA_LENS.PRESETS){
+    ok(p.id && !ids.has(p.id), "duplicate or missing id: " + p.id);
+    ids.add(p.id);
+    ok(p.label && p.group && p.note, "preset " + p.id + " is missing text");
+    ok(SA_EXIF.plausibleF35(p.f35), "preset " + p.id + " has an implausible f35: " + p.f35);
+    ok(p.tol > 0 && p.tol < 0.2, "preset " + p.id + " has a silly tolerance: " + p.tol);
+    ok(SA_LENS.byId(p.id) === p, "byId failed for " + p.id);
+  }
+  ok(SA_LENS.byId("nope") === null, "unknown id should be null");
+  return SA_LENS.PRESETS.length + " presets across " + SA_LENS.groups().length + " groups";
+});
+
+t("presets are ordered so no group is interleaved", () => {
+  const seen = [];
+  let last = null;
+  for(const p of SA_LENS.PRESETS){
+    if(p.group !== last){
+      ok(seen.indexOf(p.group) < 0, "group " + p.group + " appears in two blocks");
+      seen.push(p.group);
+      last = p.group;
+    }
+  }
+  return SA_LENS.groups().join(" / ");
+});
+
+t("tolerance ranks provenance in the right order", () => {
+  const cal = SA_LENS.tolFor("cal"), exif = SA_LENS.tolFor("exif");
+  const preset = SA_LENS.tolFor("preset", "main-26");
+  ok(cal < exif, "a measurement should beat a rounded nominal");
+  ok(exif < preset, "EXIF should beat a guess the user confirmed");
+  ok(SA_LENS.tolFor("manual") === 0, "a typed number carries no claim");
+  ok(SA_LENS.tolFor("preset", "nope") > 0, "unknown preset id still gets a tolerance");
+  return "cal " + cal + " < exif " + exif + " < preset " + preset;
 });
 
 /* ------------------------- known limitations ------------------------------ */
