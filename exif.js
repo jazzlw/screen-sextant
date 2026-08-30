@@ -298,13 +298,19 @@ function dump(buf){
    Guards against a garbage tag becoming a confident wrong answer. */
 function plausibleF35(v){ return typeof v === "number" && v > 5 && v < 400; }
 
-/* Digital zoom is the worst entry in the error budget -- a silent crop scales
-   the reading by the crop factor with nothing in the image to reveal it. The
-   spec writes 0 for "not used", so only values above 1 are a real warning. */
+/* Digital zoom, where the camera reports it. A spec-compliant camera updates
+   FocalLengthIn35mmFilm to describe the recorded image, so zoom costs
+   sharpness rather than accuracy -- verified on an iPhone 16 Pro. The spec
+   writes 0 for "not used", so only values above 1 mean anything. */
 function zoomed(x){ return typeof x === "number" && x > 1.01; }
 
-/* Sensor crop factor implied by the two focal-length tags. Diagnostic only:
-   a digital crop leaves both tags untouched, so this does not detect zoom. */
+/* Apparent crop factor implied by the two focal-length tags.
+
+   Note this is the crop of the *recorded image*, not of the sensor: measured
+   on an iPhone 16 Pro, the same lens reads 3.55x un-zoomed and 6.65x at 1.875x
+   zoom, because f35 tracks the delivered frame while FocalLength stays
+   physical. So it rises with zoom rather than being blind to it -- the
+   opposite of what this comment used to claim. */
 function cropFactor(x){
   if(!(x.f35 > 0) || !(x.focal > 0)) return null;
   return x.f35 / x.focal;

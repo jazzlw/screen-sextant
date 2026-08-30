@@ -93,6 +93,9 @@ canvas{display:block;width:100%;height:auto;touch-action:none}
   background:var(--panel);font-size:13px;color:var(--ink);display:none}
 .banner.on{display:block}
 .banner strong{color:var(--bar-magenta)}
+/* a caution, not a fault: zoom costs precision, not correctness */
+.banner.warn{border-left-color:var(--bar-yellow)}
+.banner.warn strong{color:var(--bar-yellow)}
 
 /* ---- readout: instrument panel ---- */
 .readout{margin:20px 0 0;border:1px solid var(--rule);background:var(--panel)}
@@ -309,7 +312,7 @@ let lensAsserted=null;
 /* v2: keys now include the lens. v1 keys were body+resolution only, which
    would cross-apply an ultra-wide calibration to a telephoto shot, so they are
    deliberately abandoned rather than migrated. */
-const CAL_KEY="screenangle.cal.v2";
+const CAL_KEY="screenangle.cal.v3";
 /* Reserved key inside the calibration store for "use this whenever the file
    carries no focal length". Distinct from a per-device calibration: it is a
    deliberate user-supplied fallback, not a measurement of a known camera, and
@@ -472,6 +475,28 @@ function draw(){
   ctx.moveTo(W/2,H/2-c); ctx.lineTo(W/2,H/2+c);
   ctx.stroke();
   ctx.restore();
+}
+
+/* Lifted out of load() so it can be exercised without a File object. */
+function showZoomBanner(m){
+  const zw=$("zoomWarn");
+  /* Measured on an iPhone 16 Pro: zooming updates FocalLengthIn35mmFilm to
+     describe the recorded image (24 mm at 1x, 45 mm at 1.875x) while
+     FocalLength stays at the lens's physical 6.765 mm. That is what the tag
+     is defined to mean, so the geometry stays right -- the earlier claim here,
+     that every angle was overstated by the zoom factor, was measurably wrong.
+     What zoom actually costs is sharpness, and so fit precision. */
+  if(SA_EXIF.zoomed(m.zoom)){
+    const crop=SA_EXIF.cropFactor(m);
+    zw.className="banner warn on";
+    zw.innerHTML="<strong>Digital zoom "+m.zoom.toFixed(2)+"×.</strong> The focal length "+
+      "reported here already accounts for it"+
+      (crop&&m.f35 ? " \u2014 "+m.f35+" mm against the lens\u2019s "+m.focal.toFixed(2)+
+        " mm physical, an apparent crop of "+crop.toFixed(2)+"×" : "")+
+      ", so the angles stay right. What you lose is sharpness: a zoomed frame is "+
+      "upscaled, so the screen edges are softer and the fit less precise. Shoot at 1× "+
+      "when you can.";
+  } else zw.className="banner";
 }
 
 function update(){
@@ -751,21 +776,44 @@ function assertedLens(){
    is better than any of the ways of inventing one. */
 function chooseF35(){
   const st = calRead();
-  if(devKey && st[devKey] != null)              return setF35(st[devKey], "cal");
-  if(meta && SA_EXIF.plausibleF35(meta.f35))    return setF35(meta.f35, "exif");
+  const exifF = meta && SA_EXIF.plausibleF35(meta.f35) ? meta.f35 : 0;
+  if(devKey){
+    const v = applyCal(st[devKey], exifF);
+    if(v) return setF35(v, "cal");
+  }
+  if(exifF)                                     return setF35(exifF, "exif");
   const p = SA_LENS.byId(st[LENS_KEY]);
   if(p){
     // A measurement the user took against a lens they named themselves. Some
     // devices hand the browser a metadata-stripped re-encode, where the file
     // can identify nothing -- but the user still knows which lens they used,
     // and a measured value beats this preset's nominal one.
-    const measured = st[lensCalKey(p.id)];
-    if(measured != null)                        return setF35(measured, "cal", p.id);
+    const measured = applyCal(st[lensCalKey(p.id)], 0);
+    if(measured)                                return setF35(measured, "cal", p.id);
     return setF35(p.f35, "preset", p.id);
   }
   setF35(null, "unknown");
 }
 function lensCalKey(id){ return "lens:" + id; }
+
+/* A stored calibration is one of two shapes.
+
+   {ratio} -- a correction to the camera's own reported f35. Preferred wherever
+   EXIF gives one, because a digital zoom multiplies the reported f35 while
+   leaving the lens identity untouched: measured on an iPhone 16 Pro, the same
+   lens at the same resolution reports 24 mm at 1x and 45 mm at 1.875x, with an
+   identical LensModel and FocalLength. An absolute calibration keyed to that
+   lens would be applied to the zoomed frame and be wrong by the zoom factor.
+   A ratio scales with it and stays correct at every zoom level.
+
+   {mm} -- an absolute value, for the lens-preset case where there is no EXIF
+   f35 to correct and so nothing to scale against. */
+function applyCal(rec, exifF35){
+  if(!rec || typeof rec !== "object") return null;
+  if(rec.ratio > 0 && exifF35 > 0) return exifF35 * rec.ratio;
+  if(rec.mm > 0) return rec.mm;
+  return null;
+}
 
 /* Where a calibration for the current file can be stored, or null if there is
    nothing trustworthy to key on. Either the file identifies its own lens, or
@@ -779,15 +827,22 @@ function calibKey(){
 
 function showCalState(){
   const store=calRead();
-  const dev = devKey && store[devKey]!=null ? store[devKey] : null;
+  const dev = devKey ? store[devKey] : null;
   const remembered = SA_LENS.byId(store[LENS_KEY]);
   const bits=[];
 
-  if(dev!=null) bits.push("Calibrated <b>"+dev+" mm</b> for <code>"+devKey+
-    "</code> \u2014 <button class=\"link\" id=\"forget\">forget</button>");
+  if(dev) bits.push(
+    (dev.ratio > 0
+      ? "Calibrated <b>&times;"+dev.ratio.toFixed(4)+"</b> against the camera\u2019s own figure"+
+        (f35>0 ? " (reading "+(Math.round(f35*100)/100)+" mm here)" : "")+
+        " \u2014 scales correctly with zoom"
+      : "Calibrated <b>"+dev.mm+" mm</b>")+
+    " for <code>"+devKey+"</code> \u2014 "+
+    "<button class=\"link\" id=\"forget\">forget</button>");
 
   const lensId = lensAsserted || store[LENS_KEY];
-  const lensCal = lensId!=null ? store[lensCalKey(lensId)] : null;
+  const lensRec = lensId!=null ? store[lensCalKey(lensId)] : null;
+  const lensCal = lensRec && lensRec.mm > 0 ? lensRec.mm : null;
   const lensP = SA_LENS.byId(lensId);
   if(lensCal!=null && lensP) bits.push("Calibrated <b>"+lensCal+" mm</b> for <b>"+
     lensP.label+"</b>, a lens you named \u2014 "+
@@ -841,14 +896,7 @@ async function load(file){
   chooseF35();
   showCalState();
 
-  // digital zoom is the one error big enough to invalidate the reading outright
-  const zw=$("zoomWarn");
-  if(SA_EXIF.zoomed(meta.zoom)){
-    zw.className="banner on";
-    zw.innerHTML="<strong>Digital zoom "+meta.zoom.toFixed(2)+"×.</strong> The camera cropped "+
-      "the frame but the focal-length tag still describes the uncropped lens, so every angle "+
-      "below is overstated by roughly that factor. Reshoot at 1×.";
-  } else zw.className="banner";
+  showZoomBanner(meta);
 
   const crop=SA_EXIF.cropFactor(meta);
   $("diag").textContent=[
@@ -936,8 +984,8 @@ $("lensPreset").onchange=e=>{
   const p=SA_LENS.byId(e.target.value);
   if(p){
     // a measurement already saved for this lens outranks its nominal value
-    const measured=calRead()[lensCalKey(p.id)];
-    if(measured!=null) setF35(measured,"cal",p.id);
+    const measured=applyCal(calRead()[lensCalKey(p.id)], 0);
+    if(measured) setF35(measured,"cal",p.id);
     else               setF35(p.f35,"preset",p.id);
   } else { lensAsserted=null; chooseF35(); }
   showCalState();
@@ -954,9 +1002,13 @@ $("calib").onclick=()=>{
   const key=calibKey();
   if(!img||!key||!(f35>0)) return;
   const st=calRead();
-  st[key]=Math.round(f35*100)/100;
+  const exifF = meta && SA_EXIF.plausibleF35(meta.f35) ? meta.f35 : 0;
+  // ratio wherever there is a camera figure to correct, so it survives zoom
+  st[key] = (devKey && exifF) ? {ratio: f35/exifF} : {mm: Math.round(f35*100)/100};
   if(calWrite(st)){
-    setF35(st[key], "cal", devKey ? null : (lensAsserted || calRead()[LENS_KEY]));
+    // resolve the stored record back to millimetres; it may be a ratio
+    setF35(applyCal(st[key], exifF), "cal",
+           devKey ? null : (lensAsserted || calRead()[LENS_KEY]));
     showCalState();
     update();
   } else $("calibNote").textContent="Could not save — storage is unavailable in this mode.";

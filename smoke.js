@@ -84,6 +84,7 @@ const HOOKS = `
 window.__t={update,handles,moveHandle,setF35,showCalState,calRead,calWrite,detect,defaultQuad,
   chooseF35, getKind:()=>f35kind, getPreset:()=>lensAsserted,
   prepare, dropCache:()=>{gray=null;}, getThr:()=>otsuThr, calibKey, lensCalKey,
+  showZoomBanner, applyCal,
   getQuad:()=>quad, setQuad:q=>{quad=q;}, setImg:i=>{img=i;}, setF:v=>{f35=v;},
   setDims:(w,h)=>{W=w;H=h;}, setMeta:(m,k)=>{meta=m;devKey=k;}};
 `;
@@ -248,8 +249,8 @@ check("needle stays inside the track at both extremes", () => {
 check("calibration round-trips through storage and can be forgotten", () => {
   STORE = {};
   t.setMeta({make:"Apple", model:"iPhone 15 Pro"}, "Apple iPhone 15 Pro@4032");
-  t.calWrite({...t.calRead(), "Apple iPhone 15 Pro@4032": 25.4});
-  ok(t.calRead()["Apple iPhone 15 Pro@4032"] === 25.4, "did not persist");
+  t.calWrite({...t.calRead(), "Apple iPhone 15 Pro@4032": {mm: 25.4}});
+  ok(t.calRead()["Apple iPhone 15 Pro@4032"].mm === 25.4, "did not persist");
   t.showCalState();
   ok($("calibRow").style.display === "flex", "calib row should show");
   ok($("calibNote").innerHTML.indexOf("25.4 mm") >= 0, "note was " + $("calibNote").innerHTML);
@@ -366,7 +367,7 @@ check("a metadata-stripped capture can still carry a measured calibration", () =
   t.showCalState();
   $("calib").onclick();
 
-  ok(t.calRead()["lens:main-26"] === 25.4, "not stored: " + JSON.stringify(t.calRead()));
+  ok(t.calRead()["lens:main-26"].mm === 25.4, "not stored: " + JSON.stringify(t.calRead()));
   ok(t.getKind() === "cal", "should read as calibrated, got " + t.getKind());
 
   // and it returns on the next equally-stripped file
@@ -385,6 +386,79 @@ check("a metadata-stripped capture can still carry a measured calibration", () =
      "note was " + $("tolNote").innerHTML);
   STORE = {};
   return "a measurement stays usable on a file that identifies nothing";
+});
+
+check("a calibration survives digital zoom, because it is stored as a ratio", () => {
+  /* Measured on an iPhone 16 Pro: the same lens at the same resolution reports
+     f35 24 at 1x and 45 at 1.875x, with an identical LensModel and
+     FocalLength -- so an identical device key. An absolute calibration keyed
+     to that lens would be re-applied to the zoomed frame and be wrong by the
+     zoom factor. A ratio rides along with it. */
+  STORE = {};
+  const KEY = "Apple iPhone 16 Pro / iPhone 16 Pro back triple camera 6.765mm f/1.78@5712";
+  const unzoomed = {make:"Apple", model:"iPhone 16 Pro", focal:6.765, f35:24,
+                    lens:"iPhone 16 Pro back triple camera 6.765mm f/1.78", hasExif:true};
+  const zoomed = {...unzoomed, f35:45, zoom:1.3125};
+
+  // calibrate on the un-zoomed shot: true focal length measured as 23.8
+  t.setQuad(clone(SQUARE));
+  t.setMeta(unzoomed, KEY);
+  t.setF35(23.8, "manual");
+  t.showCalState();
+  $("calib").onclick();
+  const rec = t.calRead()[KEY];
+  ok(rec && rec.ratio > 0, "should store a ratio, got " + JSON.stringify(rec));
+  ok(Math.abs(rec.ratio - 23.8/24) < 1e-9, "ratio was " + rec.ratio);
+  ok(rec.mm === undefined, "must not store an absolute value for a zoomable camera");
+
+  // the same key, now on the zoomed file
+  t.setMeta(zoomed, KEY);
+  t.chooseF35();
+  ok(t.getKind() === "cal", "should apply, got " + t.getKind());
+  const got = parseFloat($("f35").value);
+  ok(Math.abs(got - 45*(23.8/24)) < 0.01,
+     "expected " + (45*23.8/24).toFixed(3) + " mm, got " + got);
+  ok(got > 40, "an absolute calibration would have wrongly given ~23.8, got " + got);
+
+  // and back on the un-zoomed one
+  t.setMeta(unzoomed, KEY);
+  t.chooseF35();
+  ok(Math.abs(parseFloat($("f35").value) - 23.8) < 0.01,
+     "un-zoomed should read 23.8, got " + $("f35").value);
+  STORE = {};
+  return "24mm -> 23.80, 45mm -> " + (45*23.8/24).toFixed(2) + ", one stored ratio";
+});
+
+check("digital zoom reads as a precision caveat, not an accuracy error", () => {
+  // The claim this replaces -- "every angle below is overstated by the zoom
+  // factor" -- was falsified by measurement: iOS updates f35 to describe the
+  // recorded image, so the geometry is unaffected.
+  t.showZoomBanner({zoom:1.3125, f35:45, focal:6.765});
+  const on = $("zoomWarn").innerHTML;
+  ok($("zoomWarn").className.indexOf("on") >= 0, "should show for real zoom");
+  ok($("zoomWarn").className.indexOf("warn") >= 0, "should be a caution, not a fault");
+  ok(on.indexOf("already accounts for it") > 0, "must not claim the angles are wrong: " + on);
+  ok(on.indexOf("overstated") < 0, "the falsified claim must be gone");
+  ok(on.indexOf("sharpness") > 0, "should say what zoom actually costs");
+  ok(on.indexOf("6.65") > 0, "should show the apparent crop factor, got " + on);
+
+  // and stays quiet when there is no zoom, or the tag says "not used"
+  for(const z of [undefined, null, 0, 1]){
+    t.showZoomBanner({zoom:z, f35:24, focal:6.765});
+    ok($("zoomWarn").className.indexOf("on") < 0, "should stay hidden for zoom=" + z);
+  }
+  return "1.31x -> caution naming the 6.65x apparent crop; 1x -> silent";
+});
+
+check("applyCal resolves both stored shapes and rejects nonsense", () => {
+  ok(Math.abs(t.applyCal({ratio:0.99}, 45) - 44.55) < 1e-9, "ratio against EXIF");
+  ok(t.applyCal({mm:25.4}, 0) === 25.4, "absolute with no EXIF");
+  ok(t.applyCal({ratio:0.99}, 0) === null, "a ratio needs something to scale");
+  ok(t.applyCal(null, 24) === null, "missing record");
+  ok(t.applyCal(25.4, 24) === null, "a bare number is the old shape and is ignored");
+  ok(t.applyCal({ratio:0}, 24) === null, "zero ratio");
+  ok(t.applyCal({mm:-3}, 0) === null, "negative millimetres");
+  return "ratio, absolute, and five ways of being wrong";
 });
 
 check("a stripped in-page capture is named as such, with the fix", () => {

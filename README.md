@@ -115,7 +115,7 @@ axis and overreads otherwise — 4% at 600 px off center.
 |---|---|---|
 | EXIF `f₃₅` is a rounded nominal value | 1–2% | Self-calibrate (below) |
 | Missing `f₃₅` | unbounded | *No reading is given* — angles scale directly with it, so a guess would be a confident wrong answer. Supply it once and save it as a fallback |
-| Silent digital zoom crop | up to 100% | Flagged from EXIF when tagged; don't pinch-zoom |
+| Digital zoom | *none, on a spec-compliant camera* | `f₃₅` describes the recorded image, so it already accounts for the zoom — measured below. Costs sharpness, not accuracy |
 | Residual barrel distortion, ultrawide | ~1% off-axis | Keep target near center |
 | Off-centreline seat (keystone) | 13% on aspect at 20° | *corrected* — rectified, not assumed away |
 | Camera roll | 8% on vertical at 2° | *corrected* — fitted, not assumed away |
@@ -368,6 +368,58 @@ format* link as the escape hatch for desktop PNG screenshots.
 
 ---
 
+## Digital zoom is not the error I assumed
+
+The error budget used to lead with *"silent digital zoom crop, up to 100%"*, on
+the reasoning that a crop shrinks the field of view while the focal-length tag
+still describes the whole lens. Measured on an iPhone 16 Pro, that is wrong —
+the same scene, same lens, same output resolution:
+
+| | 1× | pinch-zoomed |
+|---|---|---|
+| `FocalLength` | 6.765 mm | 6.765 mm |
+| `FocalLengthIn35mmFilm` | 24 | **45** |
+| `DigitalZoomRatio` | *absent* | 1.3125 |
+| `LensModel` | identical | identical |
+| Resolution | 5712×4284 | 5712×4284 |
+
+`FocalLengthIn35mmFilm` is defined as the equivalent focal length *for the
+recorded image*, and iOS honours that: it rises to 45 while the physical
+`FocalLength` stays put. The arithmetic checks out exactly —
+
+```
+24 / 6.765 = 3.548   the iPhone 16 Pro's physical sensor crop factor
+45 / 6.765 = 6.652   apparent crop of the delivered frame
+6.652 / 3.548 = 1.875   total zoom
+1.875 / 1.3125 = 1.42857 = 10/7   the lossless sensor-crop portion
+```
+
+so `DigitalZoomRatio` is the *upscaled* remainder, and the total zoom is
+already in `f₃₅`. **The geometry is unaffected.** What zoom costs is sharpness:
+an upscaled frame has softer screen edges, so the edge fit is less precise.
+The banner says that instead of the old, false claim that every angle was
+overstated.
+
+`cropFactor()` was documented as unable to detect zoom because "a crop leaves
+both tags untouched". The opposite is true — it rises from 3.55× to 6.65×,
+precisely because `f₃₅` tracks the delivered frame while `FocalLength` does not.
+
+### Why calibrations are stored as a ratio
+
+The two shots above share a `LensModel`, a `FocalLength` and a resolution — so
+they share a device key. An absolute calibration saved on the 1× shot would be
+re-applied to the zoomed one and be wrong by 1.875×.
+
+So a per-camera calibration is stored as **a ratio against the camera's own
+reported `f₃₅`**, not as an absolute millimetre value. The ratio is the lens's
+systematic error; because `f₃₅` scales with zoom, the ratio stays correct at
+every zoom level. Calibrate once at 1×, and a 2× shot is still right.
+
+The lens-preset case stores absolute millimetres instead, since there is no
+reported `f₃₅` to correct and therefore nothing to scale against.
+
+---
+
 ## In-page camera capture strips the metadata
 
 Measured, iOS 26.5.2 on an iPhone 16 Pro, all four combinations of
@@ -438,8 +490,10 @@ To regenerate icons after editing the glyph: `python3 tools/make-icons.py`.
 - [ ] Recognize known device models from EXIF `Make`/`Model` and ship a
       calibration table, so the first shot on a common phone is already
       sub-1% without a manual calibration pass.
-- [ ] Detect digital zoom when the camera *doesn't* tag it — comparing
-      `PixelXDimension` against the sensor's native modes would catch it.
+- [ ] Confirm on a non-Apple camera that `f₃₅` accounts for zoom the way the
+      spec requires. iOS does; a vendor that doesn't would reintroduce the
+      error the budget used to claim, and nothing in a single file
+      distinguishes the two cases.
 - [ ] Optional: sub-pixel edge refinement (fit an intensity ramp across each
       edge rather than taking the threshold crossing). Probably below the
       focal-length error floor, so low priority.
