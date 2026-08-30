@@ -280,7 +280,7 @@ on the same scene and the failing combination identifies itself.
 ### Focal-length precedence
 
 ```
-per-lens calibration  >  EXIF  >  remembered lens preset  >  no reading
+per-lens calibration  >  EXIF  >  calibration for a named lens  >  lens preset  >  no reading
 ```
 
 Every angle is directly proportional to `f₃₅`, so where that number came from
@@ -292,6 +292,7 @@ point:
 |---|---|---|
 | Calibrated against a known length | 0.5% | `38.4°` |
 | EXIF | 2% | `38.4°` |
+| Calibrated against a lens you named | 0.5% | `38.4°`, with the lens named |
 | Lens preset | 4–6% | `38.4° ±1.6°` |
 | Typed by hand | your call | `38.4°` |
 
@@ -310,11 +311,17 @@ confidence. The lens goes in the key, identified by `LensModel` or by the raw
 `FocalLength` tag.
 
 The corollary is that a file which identifies no lens cannot be calibrated
-against at all — there is nothing trustworthy to key on, so the tool withdraws
-the option and says why, rather than saving something it would misapply later.
-That is the case that pushed the lens presets into existence: a
-metadata-stripped camera capture can be given a lens by name, which is a claim
-the user can check, where a bare remembered number is not.
+against **the file** — there is nothing trustworthy to key on. It can still be
+calibrated against a lens the *user* names, which is a claim they can check,
+and the reading then discloses that lens every time it is used. A stripped
+in-page capture therefore stays fully usable: name the lens once, measure once,
+and the 0.5% calibrated tolerance applies from then on.
+
+Which lens you used and what value you measured are **separate facts**, and the
+UI keeps them separate. Typing a number changes where the number came from
+without erasing which lens it was measured on — collapsing the two would make
+the combination impossible to express, which is precisely what a
+metadata-stripped file needs.
 
 ---
 
@@ -352,9 +359,45 @@ Plus a diagnostic line reporting dimensions, MIME type, and which rung won.
 transport" will confidently blame the input. Both wrong fixes came from
 trusting my own error message.
 
-The `accept="image/jpeg"` on the file input is the other half of red herring 1 —
-it makes iOS transcode HEIC on the way in, so the focal-length tag survives. The
-*accept any format* link is the escape hatch for desktop PNG screenshots.
+The `accept="image/jpeg"` on the file input was meant as the other half of red
+herring 1 — the theory being that naming a concrete type makes iOS transcode
+HEIC on the way in so the focal length survives. Measured on an iPhone 16 Pro,
+`accept` makes no observable difference either way; see below. It is kept
+because it costs nothing and may matter on other versions, with the *accept any
+format* link as the escape hatch for desktop PNG screenshots.
+
+---
+
+## In-page camera capture strips the metadata
+
+Measured, iOS 26.5.2 on an iPhone 16 Pro, all four combinations of
+`accept` × `capture`:
+
+| | In-page camera button | Camera app → library |
+|---|---|---|
+| Exif APP1 | 140 bytes | 8504 bytes |
+| Make / Model | absent | `Apple` / `iPhone 16 Pro` |
+| FocalLength | absent | 6.765 mm |
+| FocalLengthIn35mmFilm | absent | 24 |
+| LensModel | absent | `iPhone 16 Pro back triple camera 6.765mm f/1.78` |
+| Resolution | 4032×3024 | 5712×4284 |
+| Segment order | `JFIF, Exif, Photoshop 3.0, ICC` | `JFIF, Exif, MPF, ICC, AROT` |
+
+Taking the photo through the file picker's own camera button returns a
+**re-encoded** JPEG — note the `Photoshop 3.0` resource block, the
+`ColorSpace: Uncalibrated`, and the drop from 24 MP to 12 MP. What survives is
+exactly what is needed to *display* the image: orientation, resolution, pixel
+dimensions. What is gone is exactly what identifies the camera. That reads as a
+deliberate privacy profile rather than a dropped tag.
+
+The `accept` and `capture` attributes make no difference. The variable is which
+option you pick in the iOS sheet, which the page cannot control or observe.
+
+So the app recognises the signature instead — Exif present, camera identity
+absent — and names both the cause and the fix rather than saying "no focal
+length" and leaving the user to guess. `strippedByCapture()` requires *all* of
+Make, Model, LensModel and both focal lengths to be missing while the Exif
+block itself survived; any one of them present rules it out.
 
 ---
 

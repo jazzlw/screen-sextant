@@ -817,6 +817,31 @@ t("deviceKey refuses to key an unidentifiable file", () => {
   return "null rather than a key that would cross-apply";
 });
 
+t("strippedByCapture recognises the iOS in-page capture signature", () => {
+  // Measured on an iPhone 16 Pro: in-page capture keeps orientation and pixel
+  // dimensions, drops Make, Model and both focal lengths. A Camera-app photo
+  // picked from the library keeps everything.
+  const stripped = SA_EXIF.parse(makeExifJpeg(true, {orientation:6, pixelW:4032, pixelH:3024}));
+  ok(stripped.hasExif === true, "the Exif block itself does survive");
+  ok(SA_EXIF.strippedByCapture(stripped), "should recognise the stripped capture");
+
+  const full = SA_EXIF.parse(makeExifJpeg(true, PHONE));
+  ok(!SA_EXIF.strippedByCapture(full), "a full header must not be flagged");
+
+  // no Exif at all is a different fault and must not be blamed on capture
+  const none = SA_EXIF.parse(new Uint8Array([0xFF,0xD8,0xFF,0xD9]).buffer);
+  ok(none.hasExif === false, "hasExif should be false with no segment");
+  ok(!SA_EXIF.strippedByCapture(none), "no Exif is not the capture signature");
+
+  // any one identifying tag surviving is enough to rule it out
+  for(const extra of [{make:"Apple"}, {model:"iPhone"}, {focal:6.86}, {f35:24}]){
+    const partial = SA_EXIF.parse(makeExifJpeg(true, {orientation:6, ...extra}));
+    ok(!SA_EXIF.strippedByCapture(partial),
+       "should not flag when " + Object.keys(extra)[0] + " survived");
+  }
+  return "signature is exact: Exif present, camera identity absent";
+});
+
 t("identifiable() agrees with deviceKey", () => {
   const cases = [
     [{}, false],

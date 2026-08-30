@@ -68,6 +68,10 @@ code{font:600 12px ui-monospace,Menlo,monospace;color:var(--ink)}
 </header>
 
 <h2>Four ways in — try each</h2>
+<p class="hint" style="margin:0 0 10px">Each button configures the file input differently, but
+iOS still offers its own sheet: <b>the choice you make there matters more than the button.</b>
+In-page camera capture is re-encoded and stripped; Camera-app photos picked from the library
+are not.</p>
 <div class="grid">
   <button id="camJpeg">Camera<small>accept=image/jpeg<br>capture=environment</small></button>
   <button id="camAny" class="ghost">Camera<small>accept=image/*<br>capture=environment</small></button>
@@ -168,12 +172,23 @@ function verdict(rep, f35){
         + "or enter the focal length once and save it for this camera.";
   } else {
     const sub = rep.ifds.find(i => i.name.indexOf("sub-IFD") >= 0);
+    const ifd0 = rep.ifds.find(i => i.name.indexOf("IFD0") >= 0);
     const focal = sub && sub.entries.find(e => e.tag === 0x920A);
+    const hasMake = ifd0 && ifd0.entries.some(e => e.tag === 0x010F || e.tag === 0x0110);
     why = "Exif is present, but FocalLengthIn35mmFilm (0xA405) is not in it.";
-    fix = focal
-      ? "FocalLength did survive (" + focal.value + " mm). The 35mm equivalent can be "
-      + "reconstructed from that plus this device's crop factor — worth telling me."
-      : "Neither focal-length tag survived, so there is nothing to reconstruct from.";
+    if(!hasMake && !focal){
+      // orientation and size survived, everything identifying the camera did not
+      why = "Exif survived but carries nothing identifying the camera — no Make, no "
+          + "Model, neither focal length. That is the signature of an in-page camera "
+          + "capture, which iOS re-encodes.";
+      fix = "Take the photo in the Camera app and choose it from your library instead. "
+          + "Those come through untouched.";
+    } else {
+      fix = focal
+        ? "FocalLength did survive (" + focal.value + " mm). The 35mm equivalent can be "
+        + "reconstructed from that plus this device's crop factor — worth telling me."
+        : "Neither focal-length tag survived, so there is nothing to reconstruct from.";
+    }
   }
   v.innerHTML = "<p><b>No usable focal length.</b> " + why + "</p><p>" + fix + "</p>";
 }

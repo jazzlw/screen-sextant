@@ -82,7 +82,8 @@ if(!FOUND) throw new Error("no inline <script> found in index.html");
 const INLINE = FOUND[FOUND.length-1].replace(/^<script[^>]*>/, "").replace(/<\/script>$/, "");
 const HOOKS = `
 window.__t={update,handles,moveHandle,setF35,showCalState,calRead,calWrite,detect,defaultQuad,
-  chooseF35, getKind:()=>f35kind, getPreset:()=>f35preset,
+  chooseF35, getKind:()=>f35kind, getPreset:()=>lensAsserted,
+  prepare, dropCache:()=>{gray=null;}, getThr:()=>otsuThr, calibKey, lensCalKey,
   getQuad:()=>quad, setQuad:q=>{quad=q;}, setImg:i=>{img=i;}, setF:v=>{f35=v;},
   setDims:(w,h)=>{W=w;H=h;}, setMeta:(m,k)=>{meta=m;devKey=k;}};
 `;
@@ -311,35 +312,131 @@ check("an assumed focal length prints a range, a measured one does not", () => {
   return "exif " + exif.replace(/<[^>]+>/g," ") + " vs preset " + preset.replace(/<[^>]+>/g," ");
 });
 
-check("a calibration cannot be saved against a file that hides its lens", () => {
+check("a calibration needs a lens to hang on, from the file or from the user", () => {
   STORE = {};
   t.setQuad(clone(SQUARE));
   t.setF35(26, "manual");
-  // identifiable file: saving is offered
+
+  // the file names its lens: saving is offered, keyed to the file
   t.setMeta({make:"Apple", model:"iPhone", focal:6.86}, "Apple iPhone / 6.86mm@4032");
   t.showCalState();
   ok($("calib").style.display !== "none", "should offer to save for an identified lens");
-  // unidentifiable file: saving is withdrawn and the reason given
+  ok(t.calibKey() === "Apple iPhone / 6.86mm@4032", "key was " + t.calibKey());
+
+  // nothing identifiable and no lens named: nowhere to put it
   t.setMeta({make:null, model:null}, null);
+  $("lensPreset").value = "";
+  $("lensPreset").onchange({target:$("lensPreset")});
+  t.setF35(26, "manual");
   t.showCalState();
-  ok($("calib").style.display === "none", "must not offer to save with no lens identity");
-  ok($("calibNote").innerHTML.indexOf("doesn’t identify its lens") > 0,
+  ok(t.calibKey() === null, "key should be null, got " + t.calibKey());
+  ok($("calib").style.display === "none", "must not offer to save with nothing to key on");
+  ok($("calibNote").innerHTML.indexOf("neither camera nor lens") > 0,
      "should say why: " + $("calibNote").innerHTML);
+
+  // the user names the lens: saving becomes possible again
+  $("lensPreset").value = "main-26";
+  $("lensPreset").onchange({target:$("lensPreset")});
+  t.showCalState();
+  ok(t.calibKey() === "lens:main-26", "key was " + t.calibKey());
+  ok($("calib").style.display !== "none", "should offer to save against a named lens");
+  ok($("calib").textContent.indexOf("lens") > 0,
+     "button should say lens, not camera: " + $("calib").textContent);
   STORE = {};
-  return "no calibration without a lens to pin it to";
+  return "file-identified, nothing, then user-named";
 });
 
-check("typing a focal length clears any assumed-lens provenance", () => {
+check("a metadata-stripped capture can still carry a measured calibration", () => {
+  // Exactly what iOS in-page capture produces: valid Exif, but no Make, Model
+  // or focal length. Nothing to key on except the lens the user names.
+  STORE = {};
+  t.setQuad(clone(SQUARE));
+  t.setMeta({make:null, model:null, focal:null, f35:null, hasExif:true}, null);
+  $("lensPreset").value = "";
+  $("lensPreset").onchange({target:$("lensPreset")});
+  t.setF35(null, "unknown", null);
+  t.chooseF35();
+  ok(t.getKind() === "unknown", "should start with no reading, got " + t.getKind());
+
+  $("lensPreset").value = "main-26";
+  $("lensPreset").onchange({target:$("lensPreset")});
+  $("f35").value = "25.4";
+  $("f35").oninput({target:$("f35")});
+  ok(t.getPreset() === "main-26", "the lens must survive typing, got " + t.getPreset());
+  t.showCalState();
+  $("calib").onclick();
+
+  ok(t.calRead()["lens:main-26"] === 25.4, "not stored: " + JSON.stringify(t.calRead()));
+  ok(t.getKind() === "cal", "should read as calibrated, got " + t.getKind());
+
+  // and it returns on the next equally-stripped file
+  $("rememberLens").onclick();
+  t.setF35(null, "unknown");
+  t.chooseF35();
+  ok(t.getKind() === "cal", "should re-apply, got " + t.getKind());
+  ok(Math.abs(parseFloat($("f35").value) - 25.4) < 1e-9,
+     "should re-apply the measured value, got " + $("f35").value);
+
+  // measured, so no band -- but it must keep naming the user-asserted lens
+  t.update();
+  ok($("hAng").innerHTML.indexOf("±") < 0, "a measurement should not print a band");
+  ok($("tolNote").style.display !== "none", "must still name the assumed lens");
+  ok($("tolNote").innerHTML.indexOf("you named rather than the file") > 0,
+     "note was " + $("tolNote").innerHTML);
+  STORE = {};
+  return "a measurement stays usable on a file that identifies nothing";
+});
+
+check("a stripped in-page capture is named as such, with the fix", () => {
+  STORE = {};
+  t.setQuad(clone(SQUARE));
+  $("lensPreset").value = "";
+  $("lensPreset").onchange({target:$("lensPreset")});
+  t.setF35(null, "unknown", null);
+
+  // Exif survived but carries nothing identifying the camera
+  t.setMeta({make:null, model:null, focal:null, f35:null, lens:null, hasExif:true}, null);
+  t.update();
+  ok($("needF").className.indexOf("on") >= 0, "should prompt");
+  ok($("needF").innerHTML.indexOf("in-page camera capture") > 0,
+     "should name the cause: " + $("needF").innerHTML);
+  ok($("needF").innerHTML.indexOf("Camera app") > 0, "should give the fix");
+
+  // no Exif at all is a different problem and gets different words
+  t.setMeta({make:null, model:null, focal:null, f35:null, lens:null, hasExif:false}, null);
+  t.update();
+  ok($("needF").innerHTML.indexOf("in-page camera capture") < 0,
+     "must not blame capture when there is no Exif at all");
+  ok($("needF").innerHTML.indexOf("No focal length") >= 0, "generic message expected");
+  STORE = {};
+  return "cause named only when the signature actually matches";
+});
+
+check("typing a value changes its provenance but keeps the named lens", () => {
+  // Separate facts: which lens you used, and what number you measured for it.
+  // Erasing the lens when a number is typed would make the two impossible to
+  // combine, which is exactly what a metadata-stripped file requires.
   STORE = {};
   t.setF35(26, "preset", "main-26");
   ok(t.getKind() === "preset", "setup");
   $("f35").value = "31";
   $("f35").oninput({target:$("f35")});
   ok(t.getKind() === "manual", "kind was " + t.getKind());
-  ok(t.getPreset() === null, "preset id should be cleared");
-  ok($("lensPreset").value === "", "the picker should no longer claim a lens");
+  ok(t.getPreset() === "main-26", "the named lens must survive, got " + t.getPreset());
+  ok(t.calibKey() === "lens:main-26", "so it stays saveable: " + t.calibKey());
+
+  // clearing the picker really does clear it
+  $("lensPreset").value = "";
+  $("lensPreset").onchange({target:$("lensPreset")});
+  ok(t.getPreset() === null, "clearing the picker should drop the lens");
+  ok(t.calibKey() === null, "and with it the ability to save");
+
+  // EXIF naming its own lens overrides any user assertion
+  t.setF35(26, "preset", "main-26");
+  t.setF35(24, "exif");
+  ok(t.getPreset() === null, "EXIF should drop the user's assertion");
   t.setF(26);
-  return "a typed number stops claiming to be a preset";
+  return "provenance and asserted lens move independently";
 });
 
 check("calRead survives storage being unavailable", () => {
@@ -438,6 +535,7 @@ check("detect() fits a rolled screen through the whole pipeline", () => {
     const p = phi*Math.PI/180;
     // detect() downscales to 520 on the long side: 4032x3024 -> 520x390
     SCENE = rolledScene(260, 195, 300, 300/2.39, p);
+    t.dropCache();
     t.detect(0);
     t.setF(26);
     t.update();
@@ -451,8 +549,76 @@ check("detect() fits a rolled screen through the whole pipeline", () => {
   return out.join("   ");
 });
 
+check("caching the downscale does not change what detect() produces", () => {
+  // The split is a pure optimisation: prepare() holds only the
+  // threshold-independent work, so results must be bit-identical either way.
+  const p = 2*Math.PI/180;
+  SCENE = rolledScene(260, 195, 300, 300/2.39, p);
+  const seen = [];
+  for(const bias of [-30, -10, 0, 10, 30]){
+    t.dropCache();                       // cold: prepare() runs inside detect()
+    t.detect(bias);
+    const cold = JSON.stringify(t.getQuad());
+    t.detect(bias);                      // warm: reuses the cached grayscale
+    const warm = JSON.stringify(t.getQuad());
+    ok(cold === warm, "bias " + bias + " differed cold vs warm:\n  " + cold + "\n  " + warm);
+    seen.push(bias);
+  }
+  SCENE = null;
+  return "identical across " + seen.length + " threshold settings";
+});
+
+check("the threshold readout tracks the slider", () => {
+  SCENE = rolledScene(260, 195, 300, 300/2.39, 0);
+  t.dropCache();
+  t.detect(0);
+  const auto = $("thrVal").textContent;
+  ok(auto.indexOf("auto") > 0, "zero bias should read as auto, got " + auto);
+  const base = t.getThr();
+  t.detect(15);
+  ok($("thrVal").textContent.indexOf("+15") > 0, "got " + $("thrVal").textContent);
+  ok($("thrVal").textContent.indexOf(String(base+15)) === 0,
+     "should show the effective threshold " + (base+15) + ", got " + $("thrVal").textContent);
+  t.detect(-15);
+  ok($("thrVal").textContent.indexOf("(-15)") > 0, "got " + $("thrVal").textContent);
+  SCENE = null;
+  return "auto -> " + base + ", then tracks the offset";
+});
+
+check("threshold clamps rather than inverting at the extremes", () => {
+  SCENE = rolledScene(260, 195, 300, 300/2.39, 0);
+  for(const bias of [-60, -200, 60, 200]){
+    t.dropCache();
+    t.detect(bias);
+    const q = t.getQuad();
+    ok(q && q.length === 4, "no quad at bias " + bias);
+    ok(!q.some(pt => Number.isNaN(pt[0]) || Number.isNaN(pt[1])), "NaN at bias " + bias);
+    const thr = parseInt($("thrVal").textContent, 10);
+    ok(thr >= 4 && thr <= 251, "threshold " + thr + " out of range at bias " + bias);
+  }
+  SCENE = null;
+  return "clamped to 4-251, always a usable quad";
+});
+
+check("Re-detect keeps the tuned threshold instead of resetting it", () => {
+  SCENE = rolledScene(260, 195, 300, 300/2.39, 0);
+  t.dropCache();
+  $("sens").value = 20;
+  t.detect(20);
+  const tuned = t.getThr() + 20;
+  // hand-edit a corner, then re-detect: the fit returns, the tuning survives
+  const q = t.getQuad(); q[0] = [q[0][0]-300, q[0][1]-300];
+  t.detect(parseInt($("sens").value, 10));
+  ok($("sens").value == 20, "slider was reset to " + $("sens").value);
+  ok(parseInt($("thrVal").textContent, 10) === tuned,
+     "threshold moved: expected " + tuned + ", got " + $("thrVal").textContent);
+  SCENE = null;
+  return "corner edit discarded, threshold " + tuned + " retained";
+});
+
 check("detect() falls back to a default quad on a blank frame", () => {
   SCENE = (w,h) => new Uint8ClampedArray(w*h*4);   // all black, no component
+  t.dropCache();
   t.detect(0);
   const q = t.getQuad();
   ok(q && q.length === 4 && SA.isConvexQuad(q), "expected a usable default, got " + JSON.stringify(q));

@@ -78,6 +78,15 @@ input[type=file]{display:none}
 canvas{display:block;width:100%;height:auto;touch-action:none}
 .hint{font:400 12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--ink-dim);margin:8px 0 0}
 .stagebar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:12px 0 0}
+/* Threshold lives against the canvas, not down in the controls panel: its
+   whole purpose is watching the fit change as you drag it. */
+.detectbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+  margin:10px 0 0;padding:10px 12px;background:var(--panel);
+  border:1px solid var(--rule);border-radius:2px}
+.detectbar input[type=range]{flex:1 1 150px;min-width:110px}
+.detectbar .hint{margin:0;min-width:6.5em;text-align:right;
+  font-variant-numeric:tabular-nums}
+.detectbar button{padding:9px 13px}
 
 /* ---- alerts ---- */
 .banner{margin:14px 0 0;padding:11px 13px;border-left:3px solid var(--bar-magenta);
@@ -158,18 +167,28 @@ code{font:600 12px ui-monospace,Menlo,monospace;color:var(--ink)}
 
 <div class="intake" id="intake" tabindex="0" role="button" aria-label="Choose a photo of the screen">
   <button id="pick">Choose photo</button>
-  <p>Or drop an image here. Only JPEG carries the focal-length tag, so the picker
-  asks for it — iOS converts on the way in.<br><button class="link" id="pickAny">accept any format</button></p>
+  <p>Shoot in the Camera app and pick from your library. Photos taken through the
+  picker&rsquo;s own camera button come back re-encoded with the focal length stripped.
+  <br><button class="link" id="pickAny">accept any format</button></p>
 </div>
 <input type="file" id="file" accept="image/jpeg">
 
 <div id="stage">
   <div class="frame"><canvas id="cv" tabindex="0" role="img"
     aria-label="Photo with an adjustable rectangle around the screen. Use Tab to select a handle and the arrow keys to move it."></canvas></div>
+  <div class="detectbar">
+    <label for="sens">Threshold</label>
+    <input type="range" id="sens" min="-60" max="60" value="0"
+           aria-describedby="thrVal">
+    <span class="hint" id="thrVal">auto</span>
+    <button class="ghost" id="redetect">Re-detect</button>
+  </div>
+
   <p class="hint" id="editHint">Drag the corners onto the screen&rsquo;s corners &mdash; put them on the
     real corners even if the screen looks skewed, that&rsquo;s what gets corrected. Edge midpoints move a
     whole edge. Keyboard: focus the image, <code>Tab</code> cycles handles, arrows nudge,
-    <code>Shift</code> for 10&times;.</p>
+    <code>Shift</code> for 10&times;. Moving the threshold re-fits from scratch, replacing
+    any corner edits.</p>
 
   <div class="banner" id="zoomWarn"></div>
   <div class="banner" id="needF"></div>
@@ -234,11 +253,6 @@ code{font:600 12px ui-monospace,Menlo,monospace;color:var(--ink)}
         <span class="hint" style="margin:0" id="calibNote"></span>
       </div>
       <div class="row">
-        <label for="sens">Threshold</label>
-        <input type="range" id="sens" min="-60" max="60" value="0">
-        <button class="ghost" id="redetect">Re-detect</button>
-      </div>
-      <div class="row">
         <label for="sw">Screen width</label>
         <input type="number" id="sw" min="0.1" max="500" step="0.1" placeholder="ft">
         <select id="unit" aria-label="Units">
@@ -286,7 +300,11 @@ let sel=0;               // selected handle for keyboard editing
 let meta=null;           // parsed EXIF
 let devKey=null;
 let f35kind="unknown";   // provenance of f35: exif | cal | preset | manual | unknown
-let f35preset=null;      // preset id, when f35kind is "preset"
+/* Which lens the user says they used. Deliberately independent of f35kind:
+   "which lens" and "what value" are separate facts, and typing a measured
+   number must not erase the lens it was measured on -- that combination is
+   the whole point on a device that strips the metadata. */
+let lensAsserted=null;
 
 /* v2: keys now include the lens. v1 keys were body+resolution only, which
    would cross-apply an ultra-wide calibration to a telephoto shot, so they are
@@ -310,7 +328,14 @@ function calWrite(o){
 }
 
 /* ---------------- detection: Otsu + largest bright component --------------- */
-function detect(bias){
+/* Everything here depends only on the image, not on the threshold: the
+   downscale, the luminance pass, the histogram and Otsu's split. Doing it per
+   slider event meant re-downscaling a 12 MP photo on every pointer move, which
+   is most of the cost and none of the point. Computed once per image instead,
+   so dragging the threshold only re-runs the flood fill. */
+let gray=null, gw=0, gh=0, gscale=1, otsuThr=128;
+
+function prepare(){
   const MAX=520;
   const s=Math.min(1,MAX/Math.max(W,H));
   const w=Math.max(1,Math.round(W*s)), h=Math.max(1,Math.round(H*s));
@@ -336,7 +361,15 @@ function detect(bias){
     const v=wB*wF*(mB-mF)*(mB-mF);
     if(v>best){best=v;thr=t;}
   }
-  thr=Math.max(4,Math.min(251,thr+bias));
+  gray=g; gw=w; gh=h; gscale=s; otsuThr=thr;
+}
+
+function detect(bias){
+  if(!gray) prepare();
+  const g=gray, w=gw, h=gh, s=gscale;
+  const thr=Math.max(4,Math.min(251,otsuThr+bias));
+  const tv=$("thrVal");
+  if(tv) tv.textContent=thr+(bias?" ("+(bias>0?"+":"")+bias+")":" auto");
 
   // largest 4-connected component above threshold
   const lab=new Int32Array(w*h).fill(-1);
@@ -451,10 +484,17 @@ function update(){
   if(!(f35>0)){
     blankReadout();
     $("needF").className="banner on";
-    $("needF").innerHTML="<strong>No focal length in this file.</strong> Angles scale directly "+
-      "with it, so nothing is reported until it is known. Enter the 35mm-equivalent below, "+
-      "or pick the lens you used. <a href=\"probe.html\" style=\"color:var(--bar-cyan)\">The "+
-      "EXIF probe</a> shows why the tag is missing.";
+    /* Name the cause when we can recognise it. A stripped in-page capture has
+       a fix the user can act on immediately; a file with no Exif at all does not. */
+    $("needF").innerHTML = SA_EXIF.strippedByCapture(meta)
+      ? "<strong>This looks like an in-page camera capture.</strong> iOS re-encodes those "+
+        "and drops the camera data \u2014 the orientation and size survived, the focal length "+
+        "did not. <b>Take the photo in the Camera app and choose it from your library "+
+        "instead</b>, which keeps everything. Or pick the lens you used below."
+      : "<strong>No focal length in this file.</strong> Angles scale directly with it, so "+
+        "nothing is reported until it is known. Enter the 35mm-equivalent below, or pick "+
+        "the lens you used. <a href=\"probe.html\" style=\"color:var(--bar-cyan)\">The EXIF "+
+        "probe</a> shows what the file does carry.";
     return;
   }
   $("needF").className="banner";
@@ -471,14 +511,14 @@ function update(){
   /* Propagate the focal length's uncertainty into the reading, by evaluating
      at both ends of its tolerance. An assumed lens must not be able to print
      the same confident number a measured one does. */
-  const tol=SA_LENS.tolFor(f35kind,f35preset);
+  const tol=SA_LENS.tolFor(f35kind,lensAsserted);
   const tn=$("tolNote");
   if(tol>=0.03){
     const lo=SA.rectify(quad,W,H,f35*(1+tol));   // longer lens, smaller angle
     const hi=SA.rectify(quad,W,H,f35*(1-tol));
     const band=(lo.ok&&hi.ok) ? (hi.h-lo.h)/2 : 0;
     $("hAng").innerHTML=a.h.toFixed(1)+"<span>\u00b0 \u00b1"+band.toFixed(1)+"\u00b0</span>";
-    const p=SA_LENS.byId(f35preset);
+    const p=assertedLens();
     tn.style.display="";
     tn.innerHTML="Range shown because the focal length is assumed, not measured"+
       (p?" \u2014 <b style=\"color:var(--ink)\">"+p.label+"</b>, "+p.note:"")+
@@ -486,7 +526,16 @@ function update(){
       "calibrate against a known length to remove it.";
   } else {
     $("hAng").innerHTML=a.h.toFixed(1)+"<span>\u00b0</span>";
-    tn.style.display="none";
+    const p=assertedLens();
+    if(p && f35kind==="cal"){
+      /* Measured, so no error band -- but the lens was asserted by the user,
+         not read from the file, and using a different lens next time would be
+         wrong by the ratio between them. Keep saying which lens it assumes. */
+      tn.style.display="";
+      tn.innerHTML="Calibrated for <b style=\"color:var(--ink)\">"+p.label+
+        "</b>, which you named rather than the file. Shot on a different lens, "+
+        "this reading is wrong by the ratio between them.";
+    } else tn.style.display="none";
   }
   $("vAng").textContent=a.v.toFixed(1)+"\u00b0";
   $("dAng").textContent=a.d.toFixed(1)+"\u00b0";
@@ -680,14 +729,20 @@ function fail(msg){
 function setF35(v,kind,presetId){
   f35 = (v>0) ? v : null;
   f35kind = f35 ? kind : "unknown";
-  f35preset = (f35kind === "preset") ? (presetId||null) : null;
+  if(presetId !== undefined) lensAsserted = presetId;
+  else if(kind === "exif") lensAsserted = null;   // the file names its own lens
   $("f35").value = f35 ? Math.round(f35*100)/100 : "";
   $("f35src").textContent =
     {exif:"from EXIF", cal:"calibrated", preset:"assumed lens",
      unknown:"not in file — enter it", manual:"manual"}[f35kind];
   $("f35src").className = "flag " +
     {exif:"ok", cal:"cal", preset:"warn", unknown:"warn", manual:""}[f35kind];
-  $("lensPreset").value = f35preset || "";
+  $("lensPreset").value = lensAsserted || "";
+}
+/* The named lens, but only where it is the user's assertion rather than the
+   file's own record -- that is the case the readout has to keep disclosing. */
+function assertedLens(){
+  return (f35kind === "preset" || f35kind === "cal") ? SA_LENS.byId(lensAsserted) : null;
 }
 
 /* Choose f35 for a freshly loaded file. Order matters and is deliberate:
@@ -699,8 +754,27 @@ function chooseF35(){
   if(devKey && st[devKey] != null)              return setF35(st[devKey], "cal");
   if(meta && SA_EXIF.plausibleF35(meta.f35))    return setF35(meta.f35, "exif");
   const p = SA_LENS.byId(st[LENS_KEY]);
-  if(p)                                         return setF35(p.f35, "preset", p.id);
+  if(p){
+    // A measurement the user took against a lens they named themselves. Some
+    // devices hand the browser a metadata-stripped re-encode, where the file
+    // can identify nothing -- but the user still knows which lens they used,
+    // and a measured value beats this preset's nominal one.
+    const measured = st[lensCalKey(p.id)];
+    if(measured != null)                        return setF35(measured, "cal", p.id);
+    return setF35(p.f35, "preset", p.id);
+  }
   setF35(null, "unknown");
+}
+function lensCalKey(id){ return "lens:" + id; }
+
+/* Where a calibration for the current file can be stored, or null if there is
+   nothing trustworthy to key on. Either the file identifies its own lens, or
+   the user has named it -- both are checkable claims. A bare number with no
+   lens attached is not, which is why it has no key. */
+function calibKey(){
+  if(devKey) return devKey;
+  const id = lensAsserted || calRead()[LENS_KEY];
+  return id ? lensCalKey(id) : null;
 }
 
 function showCalState(){
@@ -711,25 +785,36 @@ function showCalState(){
 
   if(dev!=null) bits.push("Calibrated <b>"+dev+" mm</b> for <code>"+devKey+
     "</code> \u2014 <button class=\"link\" id=\"forget\">forget</button>");
+
+  const lensId = lensAsserted || store[LENS_KEY];
+  const lensCal = lensId!=null ? store[lensCalKey(lensId)] : null;
+  const lensP = SA_LENS.byId(lensId);
+  if(lensCal!=null && lensP) bits.push("Calibrated <b>"+lensCal+" mm</b> for <b>"+
+    lensP.label+"</b>, a lens you named \u2014 "+
+    "<button class=\"link\" id=\"forgetLensCal\">forget</button>");
+
   if(remembered) bits.push("When a file carries no focal length, assuming <b>"+
-    remembered.label+"</b> ("+remembered.f35+" mm) \u2014 "+
+    remembered.label+"</b> \u2014 "+
     "<button class=\"link\" id=\"forgetLens\">forget</button>");
 
-  /* A calibration can only be cached against a file that identifies its lens.
-     Without that there is nothing to key on, and a saved value would be
-     re-applied to a different lens later wearing a "calibrated" badge. */
-  const canSave = !!devKey && f35>0;
+  /* A calibration needs a lens to hang on. Either the file names one, or the
+     user has. Without either, a saved value would be silently re-applied to a
+     different lens later wearing a "calibrated" badge, so saving is withdrawn. */
+  const key = calibKey();
+  const canSave = !!key && f35>0;
   $("calib").style.display = canSave ? "" : "none";
+  $("calib").textContent = devKey ? "save for this camera" : "save for this lens";
   if(!canSave && f35>0 && img)
-    bits.push("This file doesn\u2019t identify its lens, so a calibration can\u2019t be "+
-      "pinned to it \u2014 use the lens setting instead.");
+    bits.push("This file identifies neither camera nor lens, so a measurement can\u2019t "+
+      "be pinned to anything \u2014 pick the lens you used above, then save.");
 
   $("calibRow").style.display = bits.length ? "flex" : "none";
   $("calibNote").innerHTML = bits.join("<br>");
 
   const reset=()=>{ showCalState(); chooseF35(); update(); };
-  if($("forget"))     $("forget").onclick=()=>{ const st=calRead(); delete st[devKey]; calWrite(st); reset(); };
-  if($("forgetLens")) $("forgetLens").onclick=()=>{ const st=calRead(); delete st[LENS_KEY]; calWrite(st); reset(); };
+  if($("forget"))        $("forget").onclick=()=>{ const st=calRead(); delete st[devKey]; calWrite(st); reset(); };
+  if($("forgetLens"))    $("forgetLens").onclick=()=>{ const st=calRead(); delete st[LENS_KEY]; calWrite(st); reset(); };
+  if($("forgetLensCal")) $("forgetLensCal").onclick=()=>{ const st=calRead(); delete st[lensCalKey(lensId)]; calWrite(st); reset(); };
 }
 
 async function load(file){
@@ -746,6 +831,7 @@ async function load(file){
   if(!W||!H){ fail("Decoded, but the image reported zero dimensions."); return; }
 
   img=src;
+  gray=null;                    // new image: the cached downscale is stale
   off.width=W; off.height=H; octx.drawImage(src,0,0);
   cv.width=W; cv.height=H;
 
@@ -808,7 +894,7 @@ $("file").onchange=e=>{
 $("intake").addEventListener("drop",e=>{ const f=e.dataTransfer.files[0]; if(f) load(f); });
 
 $("newphoto").onclick=()=>{
-  img=null; quad=null; meta=null; devKey=null;
+  img=null; quad=null; meta=null; devKey=null; gray=null;
   $("stage").style.display="none";
   $("intake").style.display="block";
   $("zoomWarn").className="banner";
@@ -821,8 +907,7 @@ $("f35").oninput=e=>{
   // typed by hand, so it is neither EXIF nor a preset any more
   f35 = v>0 ? v : null;
   f35kind = f35 ? "manual" : "unknown";
-  f35preset = null;
-  $("lensPreset").value = "";
+  // lensAsserted deliberately survives: this may be a measurement OF that lens
   $("f35src").textContent = f35 ? "manual" : "not in file — enter it";
   $("f35src").className = "flag" + (f35 ? "" : " warn");
   showCalState();
@@ -849,29 +934,55 @@ $("f35").oninput=e=>{
 
 $("lensPreset").onchange=e=>{
   const p=SA_LENS.byId(e.target.value);
-  if(p) setF35(p.f35,"preset",p.id);
-  else  chooseF35();
+  if(p){
+    // a measurement already saved for this lens outranks its nominal value
+    const measured=calRead()[lensCalKey(p.id)];
+    if(measured!=null) setF35(measured,"cal",p.id);
+    else               setF35(p.f35,"preset",p.id);
+  } else { lensAsserted=null; chooseF35(); }
   showCalState();
   update();
 };
 $("rememberLens").onclick=()=>{
-  const p=SA_LENS.byId($("lensPreset").value);
+  const p=SA_LENS.byId(lensAsserted);
   if(!p) return;
   const st=calRead();
   st[LENS_KEY]=p.id;
   if(calWrite(st)) showCalState();
 };
 $("calib").onclick=()=>{
-  if(!img||!devKey||!(f35>0)) return;
-  const s=calRead();
-  s[devKey]=Math.round(f35*100)/100;
-  if(calWrite(s)){ setF35(s[devKey],"cal"); showCalState(); }
-  else $("calibNote").textContent="Could not save — storage is unavailable in this mode.";
+  const key=calibKey();
+  if(!img||!key||!(f35>0)) return;
+  const st=calRead();
+  st[key]=Math.round(f35*100)/100;
+  if(calWrite(st)){
+    setF35(st[key], "cal", devKey ? null : (lensAsserted || calRead()[LENS_KEY]));
+    showCalState();
+    update();
+  } else $("calibNote").textContent="Could not save — storage is unavailable in this mode.";
 };
 $("sw").oninput=update;
 $("unit").onchange=()=>{ $("sw").placeholder=$("unit").value; update(); };
-$("sens").oninput=()=>{ if(img){ detect(parseInt($("sens").value,10)); update(); } };
-$("redetect").onclick=()=>{ if(img){ detect(parseInt($("sens").value,10)); update(); } };
+/* Coalesce slider events to one recompute per frame. A drag can emit events
+   faster than the fit can be recomputed, and queueing them all would make the
+   overlay lag behind the thumb -- the opposite of the point. */
+const raf = window.requestAnimationFrame || (fn => fn());
+let detectPending=false;
+function reDetect(){
+  if(!img || detectPending) return;
+  detectPending=true;
+  raf(()=>{
+    detectPending=false;
+    if(!img) return;
+    detect(parseInt($("sens").value,10));
+    update();
+  });
+}
+$("sens").oninput=reDetect;
+/* Re-fit at the threshold you tuned, rather than resetting it. The useful
+   action here is "throw away my corner edits and go back to the auto fit",
+   and resetting the slider would discard the tuning as well. */
+$("redetect").onclick=reDetect;
 window.addEventListener("resize",()=>{ if(img) update(); });
 
 // meter furniture

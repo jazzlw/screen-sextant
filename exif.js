@@ -101,11 +101,12 @@ function findTiff(dv){
    break the load. */
 function parse(buf){
   const out = {make:null, model:null, orientation:null, focal:null, f35:null,
-               zoom:null, pixelW:null, pixelH:null, lens:null};
+               zoom:null, pixelW:null, pixelH:null, lens:null, hasExif:false};
   try{
     const dv = new DataView(buf);
     const base = findTiff(dv);
     if(base < 0) return out;
+    out.hasExif = true;
 
     const bo = dv.getUint16(base);
     if(bo !== 0x4949 && bo !== 0x4D4D) return out;
@@ -329,6 +330,20 @@ function deviceKey(x, W, H){
   return [body, lens].filter(Boolean).join(" / ") + "@" + Math.max(W, H);
 }
 
+/* An Exif block that survived but carries nothing identifying the camera.
+
+   iOS Safari's in-page camera capture re-encodes the photo and writes a
+   minimal Exif block: orientation, resolution and pixel dimensions survive,
+   while Make, Model and both focal lengths do not. A photo taken in the
+   Camera app and chosen from the library is untouched, so this is worth
+   naming precisely -- the fix is which button the user presses, not anything
+   the page can do. */
+function strippedByCapture(x){
+  return !!x && x.hasExif === true &&
+         !x.make && !x.model && !x.lens &&
+         !(x.f35 > 0) && !(x.focal > 0);
+}
+
 /* Can this file's camera and lens be pinned down well enough to cache a
    calibration against? Needs the lens, one way or another: the body alone
    does not determine the focal length. */
@@ -339,6 +354,7 @@ function identifiable(x){
   return hasBody && hasLens;
 }
 
-return {parse, plausibleF35, zoomed, cropFactor, deviceKey, identifiable, tag, findTiff,
+return {parse, plausibleF35, zoomed, cropFactor, deviceKey, identifiable,
+        strippedByCapture, tag, findTiff,
         dump, container, segments, tagName, markerName};
 })();
