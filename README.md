@@ -138,13 +138,16 @@ with resolution, so both belong in the key.
 4. Iterative flood fill (4-connected) over the above-threshold mask; keep the
    largest component.
 5. Collect that component's boundary pixels and fit a **minimum-area rectangle**
-   by rotating calipers over their convex hull.
+   by rotating calipers over their convex hull. This is only a starting guess.
 6. Refine that rectangle into a **quadrilateral**: assign each boundary point to
    its nearest side, fit a total-least-squares line per side, intersect adjacent
    pairs. A keystoned screen still has straight edges — only the rectangle
    assumption fails, not the straightness one. Declines and keeps the rectangle
    whenever the result isn't clearly better.
-7. Scale back to native resolution.
+7. **Snap each side onto the strongest edge in the image**, which is what
+   actually locates the screen — see below. Falls back to step 6, then to the
+   rectangle, if no convincing edge is there.
+8. Scale back to native resolution.
 
 In a dark auditorium the lit rectangle separates cleanly and this lands first
 try. Four corner handles and four edge-midpoint handles for when it doesn't.
@@ -244,11 +247,60 @@ whose points scatter is not an edge, and the refinement is refused rather than
 believed. The minimum-area rectangle then stands, which on this photo is within
 about 2% of the truth.
 
-What remains is the harder half: the mask under-reaches wherever the screen's
-own content is dark, so even the rectangle is slightly small. Fixing that needs
-the screen's *edge* rather than its lit area — a gradient search perpendicular
-to each side of the initial rectangle would find the real discontinuity between
-picture and wall. That is the next real improvement, and it is listed below.
+### Snapping to the edge instead of the lit area
+
+The mask can only ever find the *lit* region. The screen's edge is a luminance
+discontinuity, though, and that survives whatever is being shown — on the photo
+above the step at one edge was 150 → 59 across two pixels, in a region the mask
+had already given up on. So `snapQuad` walks perpendicular to each side of the
+initial rectangle and fits a line to where the step actually is.
+
+Two things about it are not obvious, and both were found by measurement rather
+than reasoning:
+
+**Take the outermost significant step, not the strongest.** Where the picture
+is dark at an edge, the biggest step along that normal is lit-picture to
+dark-picture, sitting well *inside* the screen. The boundary is the smaller
+step from dark picture to wall.
+
+**But outermost alone fails too.** On the same photo's top edge, "outermost"
+found a bookshelf 30 px beyond the screen for the left third of the side. What
+separates the screen's edge from both impostors is that it runs the *whole
+length* of the side — so every significant step is collected as a candidate,
+and the chosen line is the outermost one that most samples agree on. That is a
+small consensus search over a narrow fan of slopes, the seed side having
+already fixed the angle to within a few degrees.
+
+It runs three passes with shrinking search radii. That is not an optimisation:
+one pass must pick a single radius, and it needs a large one to reach an edge
+the mask fell 30 px short of, but a small one to avoid latching onto the
+furniture. Successive passes get the reach of the first and the precision of
+the last.
+
+Measured against edges read directly off the photo:
+
+| | worst corner error | aspect | obliquity |
+|---|---|---|---|
+| minimum-area rectangle | 32.0 px | 0.601 | 5.1° |
+| after snapping | **9.6 px** | 0.421 | 32.7° |
+
+Three of the four corners land within 2.3 px. And the snapped quad is
+**identical at every threshold**, which the mask fit is not — the slider stops
+mattering, because the answer no longer comes from the mask.
+
+Roughly 16 ms at the 520 px working size, so it re-runs live under the
+threshold slider.
+
+### Looking at a fit
+
+```
+python3 tools/overlay.py photo.jpg out.png [bias]
+```
+
+Draws the mask, the rectangle (yellow) and the snapped quad (cyan) over the
+photo. The geometry comes from the real `geom.js` run under `jsc`, so what you
+see is what the app computes. Judging a fit by eye catches things no assertion
+was written for.
 
 **It detects the projected image, not the physical screen.** With masking closed
 on a scope feature you'll read 2.39:1 — which is the honest answer for what
@@ -547,17 +599,12 @@ To regenerate icons after editing the glyph: `python3 tools/make-icons.py`.
       spec requires. iOS does; a vendor that doesn't would reintroduce the
       error the budget used to claim, and nothing in a single file
       distinguishes the two cases.
-- [ ] **Snap each side to the strongest gradient.** The current fit is
-      photometric: it thresholds brightness and fits the lit blob. A screen
-      showing dark content at one edge therefore reads slightly small, and no
-      threshold recovers it, because a black patch of picture and a black bezel
-      are the same pixels. The screen's edge is a real luminance
-      discontinuity though — searching perpendicular to each side of the
-      initial rectangle for the maximum gradient would find it regardless of
-      what is being shown. This subsumes the sub-pixel item below.
-- [ ] Optional: sub-pixel edge refinement (fit an intensity ramp across each
-      edge rather than taking the threshold crossing). Probably below the
-      focal-length error floor, so low priority.
+- [ ] Move Otsu and the connected-component pass into `geom.js`. They are pure
+      functions over a luminance buffer, but they live in `index.html`, so
+      `tools/overlay.py` reimplements them and the two can drift.
+- [ ] Collect a few more photos with a measured reference and turn them into a
+      regression set. One photo drove every tuning decision in `snapQuad`,
+      which is one photo too few.
 
 ---
 

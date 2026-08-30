@@ -84,6 +84,7 @@ const HOOKS = `
 window.__t={update,handles,moveHandle,setF35,showCalState,calRead,calWrite,detect,defaultQuad,
   chooseF35, getKind:()=>f35kind, getPreset:()=>lensAsserted,
   prepare, dropCache:()=>{gray=null;}, getThr:()=>otsuThr, calibKey, lensCalKey,
+  getFitSource:()=>fitSource,
   showZoomBanner, applyCal,
   getQuad:()=>quad, setQuad:q=>{quad=q;}, setImg:i=>{img=i;}, setF:v=>{f35=v;},
   setDims:(w,h)=>{W=w;H=h;}, setMeta:(m,k)=>{meta=m;devKey=k;}};
@@ -688,6 +689,43 @@ check("Re-detect keeps the tuned threshold instead of resetting it", () => {
      "threshold moved: expected " + tuned + ", got " + $("thrVal").textContent);
   SCENE = null;
   return "corner edit discarded, threshold " + tuned + " retained";
+});
+
+check("detect() reaches the screen edge through the whole pipeline", () => {
+  /* End to end with edge snapping in place: a rolled screen whose picture is
+     dark along one edge, so the threshold mask stops short. The reported quad
+     must reach the real edge anyway, and must not depend on the threshold. */
+  const seen = [];
+  for(const bias of [-20, 0, 20]){
+    SCENE = (w,h) => {
+      const d = new Uint8ClampedArray(w*h*4);
+      const phi = 3*Math.PI/180, co = Math.cos(-phi), si = Math.sin(-phi);
+      const cx = 260, cy = 195, rw = 300, rh = 300/2.39;
+      for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+        const dx=x-cx, dy=y-cy;
+        const u = dx*co - dy*si, v = dx*si + dy*co;
+        let g = 18;                                     // wall
+        if(Math.abs(u) <= rw/2 && Math.abs(v) <= rh/2)
+          g = (v > rh/2 - rh*0.22) ? 74 : 235;          // dark band at one edge
+        const i=(y*w+x)*4;
+        d[i]=d[i+1]=d[i+2]=g; d[i+3]=255;
+      }
+      return d;
+    };
+    t.dropCache();
+    t.detect(bias);
+    const q = t.getQuad();
+    // detect() reports in native pixels; the scene is defined at 520x390
+    const s = 520/W;
+    const hs = q.map(p => [p[0]*s, p[1]*s]);
+    const height = (Math.hypot(hs[3][0]-hs[0][0], hs[3][1]-hs[0][1]) +
+                    Math.hypot(hs[2][0]-hs[1][0], hs[2][1]-hs[1][1]))/2;
+    ok(Math.abs(height - 300/2.39) < 6,
+       "bias " + bias + ": height " + height.toFixed(1) + ", wanted " + (300/2.39).toFixed(1));
+    seen.push(bias + ":" + height.toFixed(1) + "(" + t.getFitSource() + ")");
+  }
+  SCENE = null;
+  return "true height 125.5 -> " + seen.join("  ");
 });
 
 check("detect() falls back to a default quad on a blank frame", () => {

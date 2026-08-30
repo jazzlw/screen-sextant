@@ -297,7 +297,7 @@ const off=document.createElement("canvas"), octx=off.getContext("2d",{willReadFr
 
 let img=null, W=0, H=0, f35=null;
 let quad=null;           // [TL,TR,BR,BL] corners in image pixels
-let keystoneAuto=false;  // did the detector refine the rect into a real quad?
+let fitSource="";        // how the quad was arrived at, for the diagnostic line
 let drag=null;           // index into handles() while pointer-dragging
 let sel=0;               // selected handle for keyboard editing
 let meta=null;           // parsed EXIF
@@ -393,7 +393,7 @@ function detect(bias){
     if(area>bestArea){bestArea=area;bestId=id;}
     id++;
   }
-  if(bestId<0 || bestArea<40){ quad=defaultQuad(); return; }
+  if(bestId<0 || bestArea<40){ quad=defaultQuad(); fitSource="default"; return; }
 
   /* Fit a rotated rectangle rather than take a bounding box. Only the
      component's boundary is needed -- the hull of the boundary is the hull of
@@ -413,10 +413,18 @@ function detect(bias){
      is a trapezoid, not a rectangle, so refine each side by fitting a line to
      the boundary points along it. refineQuad returns null when the result is
      not clearly better, in which case the rect stands. */
-  const refined=SA.refineQuad(pts, fit);
-  const small = refined ||
-    SA.corners({cx:fit.cx, cy:fit.cy, w:fit.w+1, h:fit.h+1, t:fit.t});
-  keystoneAuto = !!refined;
+  // points are pixel centers, so the fitted extent is one pixel short
+  const grown = {cx:fit.cx, cy:fit.cy, w:fit.w+1, h:fit.h+1, t:fit.t};
+
+  /* Snap each side onto the strongest edge in the image, falling back to the
+     mask-derived refinement and then to the rectangle itself. Snapping works
+     from luminance rather than from the threshold mask, so it recovers edges
+     the mask never had -- and it gives the same answer at every threshold,
+     which the mask fit does not. */
+  const snapped = SA.snapQuad(g, w, h, grown);
+  const refined = snapped || SA.refineQuad(pts, fit);
+  fitSource = snapped ? "snapped" : (refined ? "edge-fit" : "rectangle");
+  const small = refined || SA.corners(grown);
   quad = small.map(pt => [pt[0]/s, pt[1]/s]);
 }
 function defaultQuad(){
@@ -903,6 +911,7 @@ async function load(file){
     W+"×"+H,
     file.type||"no type",
     "via "+decodePath,
+    fitSource ? "fit: "+fitSource : null,
     [meta.make,meta.model].filter(Boolean).join(" ")||"unknown camera",
     meta.focal?meta.focal.toFixed(2)+"mm"+(crop?" ×"+crop.toFixed(2):""):null
   ].filter(Boolean).join(" · ");

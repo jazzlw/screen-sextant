@@ -464,6 +464,204 @@ function refineQuad(pts, r){
   return quad;
 }
 
+/* --------------------------------------------------------------------------
+   Edge snapping.
+
+   refineQuad works from the threshold mask, and inherits its central flaw:
+   the mask is the *lit* region, not the screen. Where the picture happens to
+   be dark at an edge, the mask stops short, and no threshold recovers it --
+   a black patch of picture and a black bezel are the same pixels.
+
+   The screen's edge is still there in the image, though, as a luminance
+   discontinuity between picture and wall. Measured on a living-room photo the
+   step at the bottom edge was 150 -> 59 across two pixels, in a region the
+   mask had already given up on. So search for the step directly: walk
+   perpendicular to each side of the initial rectangle, take the strongest
+   gradient, and fit a line to where those peaks land.
+
+   Photometric in, geometric out, and it never asks the picture to be bright.
+   -------------------------------------------------------------------------- */
+
+/* Bilinear sample of a luminance buffer; null outside the image. */
+function sampleAt(g,w,h,x,y){
+  if(!(x >= 0 && y >= 0 && x <= w-1 && y <= h-1)) return null;
+  const x0=Math.floor(x), y0=Math.floor(y);
+  const x1=Math.min(x0+1,w-1), y1=Math.min(y0+1,h-1);
+  const fx=x-x0, fy=y-y0;
+  return g[y0*w+x0]*(1-fx)*(1-fy) + g[y0*w+x1]*fx*(1-fy)
+       + g[y1*w+x0]*(1-fx)*fy     + g[y1*w+x1]*fx*fy;
+}
+
+function median(a){
+  if(!a.length) return 0;
+  const b = a.slice().sort((x,y)=>x-y);
+  const m = b.length>>1;
+  return b.length%2 ? b[m] : (b[m-1]+b[m])/2;
+}
+
+/* Least-squares line with two rounds of outlier trimming. A handful of
+   samples will always land on something that is not the edge -- a cable, a
+   reflection, the corner of a speaker -- and one bad sample in forty is
+   enough to tilt a line that then propagates into both adjacent corners. */
+function fitLineRobust(pts, tol){
+  let cur = pts, line = fitLine(cur);
+  if(!line) return null;
+  for(let iter=0; iter<2; iter++){
+    const lim = Math.max(tol, 2*line.rms);
+    const keep = cur.filter(p =>
+      Math.abs((p[0]-line.px)*(-line.dy) + (p[1]-line.py)*line.dx) <= lim);
+    if(keep.length < 8 || keep.length === cur.length) break;
+    const next = fitLine(keep);
+    if(!next) break;
+    cur = keep; line = next;
+  }
+  return {line: line, n: cur.length, of: pts.length};
+}
+
+/* Snap each side to the strongest luminance step near it.
+
+   Iterative, and that is not an optimisation. A single pass has to choose one
+   search radius: too small and it cannot reach the edge when the mask fell
+   well short -- exactly the case this exists for -- while too large invites
+   latching onto a cable or a picture frame. Successive passes with shrinking
+   radii get the reach of the first and the precision of the last.
+
+   Works on a quad rather than a rectangle, so each pass searches perpendicular
+   to the current estimate of each side and keystone is carried along.
+
+   Accepts a rect or a quad as the seed. Returns [TL,TR,BR,BL], or null when
+   any side lacks a convincing edge. */
+function snapQuad(g,w,h,seed,opts){
+  if(!g || !seed) return null;
+  const o = Object.assign({samples:56, skip:0.14, passes:[0.30,0.12,0.06],
+                           rmsFrac:0.02, minInliers:0.5, edgeFrac:0.22,
+                           edgeFloor:6, maxCandidates:4, slopes:7, slopeSpan:6,
+                           minSupport:0.55, anchorStride:3}, opts||{});
+  let quad = (seed.cx !== undefined) ? corners(asRect(seed))
+                                     : seed.map(p => p.slice());
+  if(quad.length !== 4 || !isConvexQuad(quad)) return null;
+  const start = quad.map(p => p.slice());
+
+  const shortestSide = q => {
+    let m = Infinity;
+    for(let i=0;i<4;i++)
+      m = Math.min(m, Math.hypot(q[(i+1)%4][0]-q[i][0], q[(i+1)%4][1]-q[i][1]));
+    return m;
+  };
+  const diagOf = q => Math.hypot(q[2][0]-q[0][0], q[2][1]-q[0][1]);
+
+  for(const frac of o.passes){
+    const R = Math.max(3, Math.min(60, frac*shortestSide(quad)));
+    const span = diagOf(quad);
+    const L = [];
+    for(let i=0;i<4;i++){
+      const A = quad[i], B = quad[(i+1)%4];
+      const ex = B[0]-A[0], ey = B[1]-A[1];
+      const len = Math.hypot(ex,ey);
+      if(len < 8) return null;
+      // outward normal, for the TL,TR,BR,BL winding in y-down image coords
+      const nx = ey/len, ny = -ex/len;
+      /* Collect every significant step along each normal, not one.
+
+         Neither "strongest" nor "outermost" survives contact with a real
+         room. Strongest picks the step from lit picture to dark picture,
+         well inside the screen. Outermost picks a bookshelf edge 30px beyond
+         it. Measured on one photo, both failure modes appear on the same
+         side of the same screen.
+
+         What separates the screen's edge from both is that it runs the whole
+         length of the side. So gather candidates, then choose the outermost
+         line that most samples agree on. */
+      const cand = [];                       // {k, s, d, mag} per candidate
+      for(let k=0;k<o.samples;k++){
+        const t = o.skip + (1-2*o.skip)*k/(o.samples-1);
+        const px = A[0]+ex*t, py = A[1]+ey*t;
+        const prof = [];
+        for(let d=-R; d<=R; d++) prof.push(sampleAt(g,w,h,px+nx*d,py+ny*d));
+
+        const grad = [];
+        let bestMag = 0;
+        for(let j=1;j<prof.length-1;j++){
+          const gj = (prof[j-1]==null || prof[j+1]==null) ? null
+                                                          : Math.abs(prof[j+1]-prof[j-1]);
+          grad.push(gj);
+          if(gj != null && gj > bestMag) bestMag = gj;
+        }
+        const cutoff = Math.max(o.edgeFrac*bestMag, o.edgeFloor);
+        const peaks = [];
+        for(let j=0;j<grad.length;j++){
+          if(grad[j] == null || grad[j] < cutoff) continue;
+          if(j > 0 && grad[j-1] != null && grad[j-1] > grad[j]) continue;
+          if(j < grad.length-1 && grad[j+1] != null && grad[j+1] > grad[j]) continue;
+          let sub = 0;
+          const a1 = j>0 ? grad[j-1] : null, c1 = j<grad.length-1 ? grad[j+1] : null;
+          if(a1 != null && c1 != null){
+            const den = a1 - 2*grad[j] + c1;
+            if(Math.abs(den) > 1e-9) sub = Math.max(-1, Math.min(1, 0.5*(a1-c1)/den));
+          }
+          peaks.push({d: -R + 1 + j + sub, mag: grad[j]});
+        }
+        peaks.sort((p,q) => q.mag - p.mag);
+        for(const pk of peaks.slice(0, o.maxCandidates))
+          cand.push({k:k, s:t*len, d:pk.d, mag:pk.mag});
+      }
+      if(cand.length < 12) return null;
+
+      /* Consensus over lines in (arc-position, offset) space. Slopes are
+         searched over a narrow fan, because the seed side already fixes the
+         angle to within a few degrees. */
+      const tol = Math.max(1.5, 0.012*len);
+      const need = Math.max(8, o.minSupport*o.samples);
+      let bestScore = 0, bestOut = -Infinity, bestPick = null;
+      for(let si=0; si<o.slopes; si++){
+        const ang = (-o.slopeSpan + 2*o.slopeSpan*si/(o.slopes-1)) * Math.PI/180;
+        const b = Math.tan(ang);
+        for(let ai=0; ai<cand.length; ai+=o.anchorStride){
+          const anchor = cand[ai];
+          const seen = new Array(o.samples).fill(null);
+          let n = 0, sum = 0;
+          for(const c of cand){
+            const want = anchor.d + b*(c.s - anchor.s);
+            const err = Math.abs(c.d - want);
+            if(err > tol) continue;
+            if(seen[c.k] == null || err < Math.abs(seen[c.k].d - (anchor.d + b*(seen[c.k].s-anchor.s)))){
+              if(seen[c.k] == null) n++;
+              seen[c.k] = c;
+            }
+          }
+          if(n < need) continue;
+          for(const c of seen) if(c) sum += c.d;
+          const meanOut = sum/n;
+          // prefer the outermost line that still carries broad support
+          if(meanOut > bestOut + 0.5 || (Math.abs(meanOut-bestOut) <= 0.5 && n > bestScore)){
+            bestOut = meanOut; bestScore = n; bestPick = seen.filter(Boolean);
+          }
+        }
+      }
+      if(!bestPick) return null;
+
+      const strong = bestPick.map(c => {
+        const t = c.s/len;
+        return [A[0]+ex*t + nx*c.d, A[1]+ey*t + ny*c.d];
+      });
+      const fit = fitLineRobust(strong, 0.004*span);
+      if(!fit || fit.line.rms > o.rmsFrac*span) return null;
+      L.push(fit.line);
+    }
+
+    const next = [intersectLines(L[0],L[3]), intersectLines(L[0],L[1]),
+                  intersectLines(L[2],L[1]), intersectLines(L[2],L[3])];
+    if(next.some(q => !q) || !isConvexQuad(next)) return null;
+    quad = next;
+  }
+
+  // a snap adjusts the seed; it does not go looking for a different screen
+  const span0 = diagOf(start);
+  for(let i=0;i<4;i++)
+    if(Math.hypot(quad[i][0]-start[i][0], quad[i][1]-start[i][1]) > 0.5*span0) return null;
+  return quad;
+}
+
 const STD = [[1.33,"1.33 Academy"],[1.66,"1.66"],[1.78,"1.78 HD"],
              [1.85,"1.85 Flat"],[2.00,"2.00"],[2.39,"2.39 Scope"]];
 
@@ -479,6 +677,7 @@ return {deg, fpx, ray, angleBetween, distance, measure, nearestAR, STD,
         asRect, normalizeRect, toLocal, toWorld, corners, edgeMids,
         convexHull, minAreaRect,
         rectify, perpDistance, centerDistance, quadFromRect, quadCentroid,
-        isConvexQuad, refineQuad, fitLine, intersectLines,
+        isConvexQuad, refineQuad, fitLine, fitLineRobust, intersectLines,
+        snapQuad, sampleAt, median,
         cross3, dot3, norm3, unit3};
 })();

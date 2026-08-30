@@ -341,6 +341,139 @@ t("centerDistance exceeds perpendicular distance off the centerline", () => {
   return out.join("   ");
 });
 
+/* ----------------------------- edge snapping ------------------------------ */
+/* Render a screen into a luminance buffer: a quad of given interior brightness
+   on a wall of given brightness, with optional dark bands inside the screen to
+   reproduce the case the threshold mask cannot handle. */
+function renderScene(w,h,quad,opts){
+  opts = opts||{};
+  const wall = opts.wall != null ? opts.wall : 40;
+  const screen = opts.screen != null ? opts.screen : 180;
+  const g = new Float64Array(w*h);
+  const inside = (x,y) => {
+    let sign = 0;
+    for(let i=0;i<4;i++){
+      const a=quad[i], b=quad[(i+1)%4];
+      const z=(b[0]-a[0])*(y-a[1])-(b[1]-a[1])*(x-a[0]);
+      if(Math.abs(z) < 1e-12) continue;
+      const t = z>0?1:-1;
+      if(!sign) sign=t; else if(t!==sign) return false;
+    }
+    return true;
+  };
+  // fractional position across the quad, for placing dark bands
+  const c = SA.quadCentroid(quad);
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+    let v = wall;
+    if(inside(x,y)){
+      v = screen;
+      for(const band of (opts.bands||[])){
+        // band = {from,to,level} as a fraction down the quad
+        const fy = (y - (quad[0][1]+quad[1][1])/2) /
+                   (((quad[2][1]+quad[3][1])/2) - ((quad[0][1]+quad[1][1])/2));
+        if(fy >= band.from && fy <= band.to) v = band.level;
+      }
+    }
+    g[y*w+x] = v + (opts.noise ? ((x*7+y*13)%11 - 5)*opts.noise : 0);
+  }
+  return g;
+}
+function worstCorner(a,b){
+  let m=0;
+  for(let i=0;i<4;i++) m=Math.max(m, Math.hypot(a[i][0]-b[i][0], a[i][1]-b[i][1]));
+  return m;
+}
+
+t("snapQuad recovers a screen from a deliberately wrong starting rectangle", () => {
+  const W2=400, H2=300;
+  const quad=[[110,70],[290,70],[290,220],[110,220]];
+  const g = renderScene(W2,H2,quad,{noise:1});
+  const out=[];
+  // start from rects that are too small, too large, and offset
+  for(const [dw,dh,dx,dy] of [[-16,-16,0,0],[14,14,0,0],[-10,8,6,-5],[0,0,0,0]]){
+    const start={cx:200+dx, cy:145+dy, w:180+dw, h:150+dh, t:0};
+    const got = SA.snapQuad(g,W2,H2,start);
+    ok(got, "declined for start " + JSON.stringify([dw,dh,dx,dy]));
+    const err = worstCorner(got, quad);
+    ok(err < 1.5, "corner error " + fmt(err) + "px for start " + [dw,dh,dx,dy]);
+    out.push(fmt(err));
+  }
+  return "worst corner error: " + out.join(", ") + " px";
+});
+
+t("snapQuad finds an edge the threshold mask cannot", () => {
+  /* The measured failure: the picture is dark right at one edge, so the lit
+     region stops short of the screen. The step from dark picture to lit wall
+     is still there, which is what snapping uses. */
+  const W2=400, H2=300;
+  const quad=[[110,70],[290,70],[290,220],[110,220]];
+  const g = renderScene(W2,H2,quad,{wall:40, screen:180,
+                                    bands:[{from:0.78, to:1.0, level:70}], noise:1});
+  // a rect fitted to the *lit* part only, as the mask would produce
+  const litOnly = {cx:200, cy:(70+(70+150*0.78))/2, w:180, h:150*0.78, t:0};
+  const naive = SA.corners(litOnly);
+  ok(worstCorner(naive, quad) > 25, "setup: the mask-derived rect should be short");
+
+  const got = SA.snapQuad(g,W2,H2,litOnly);
+  ok(got, "snapQuad declined on the case it exists for");
+  const err = worstCorner(got, quad);
+  ok(err < 2, "corner error " + fmt(err) + "px");
+  return "mask short by " + fmt(worstCorner(naive,quad)) + "px, snapped to " + fmt(err) + "px";
+});
+
+t("snapQuad handles a rolled screen", () => {
+  const W2=460, H2=360;
+  const r = {cx:230, cy:180, w:200, h:150, t:7*Math.PI/180};
+  const quad = SA.corners(r);
+  const g = renderScene(W2,H2,quad,{noise:1});
+  const start = {cx:232, cy:177, w:186, h:140, t:5*Math.PI/180};
+  const got = SA.snapQuad(g,W2,H2,start);
+  ok(got, "declined on a rolled screen");
+  const err = worstCorner(got, quad);
+  ok(err < 2, "corner error " + fmt(err) + "px");
+  return fmt(err) + "px on a 7-degree roll started from 5";
+});
+
+t("snapQuad declines when there is no edge to find", () => {
+  const W2=300, H2=200;
+  const flat = new Float64Array(W2*H2).fill(120);
+  ok(SA.snapQuad(flat,W2,H2,{cx:150,cy:100,w:120,h:90,t:0}) === null, "uniform image");
+
+  const noise = new Float64Array(W2*H2);
+  for(let i=0;i<noise.length;i++) noise[i] = (i*2654435761 % 255);
+  const got = SA.snapQuad(noise,W2,H2,{cx:150,cy:100,w:120,h:90,t:0});
+  ok(got === null || SA.isConvexQuad(got), "noise produced a non-convex quad");
+
+  ok(SA.snapQuad(null,W2,H2,{cx:150,cy:100,w:120,h:90,t:0}) === null, "no buffer");
+  ok(SA.snapQuad(flat,W2,H2,{cx:150,cy:100,w:2,h:2,t:0}) === null, "degenerate rect");
+  return "no edge, no quad";
+});
+
+t("sampleAt interpolates and refuses to read outside the image", () => {
+  const g = [0,100, 200,300];                    // 2x2
+  near(SA.sampleAt(g,2,2,0,0), 0, 1e-9, "corner");
+  near(SA.sampleAt(g,2,2,1,0), 100, 1e-9, "corner");
+  near(SA.sampleAt(g,2,2,0.5,0), 50, 1e-9, "halfway along the top");
+  near(SA.sampleAt(g,2,2,0.5,0.5), 150, 1e-9, "centre");
+  ok(SA.sampleAt(g,2,2,-0.01,0) === null, "left of the image");
+  ok(SA.sampleAt(g,2,2,0,1.01) === null, "below the image");
+  return "bilinear, bounds-checked";
+});
+
+t("fitLineRobust discards the outlier that would tilt the line", () => {
+  const pts=[];
+  for(let i=0;i<40;i++) pts.push([i*4, 100]);
+  pts.push([80, 160], [84, 30]);                 // two samples off the edge
+  const naive = SA.fitLine(pts);
+  const robust = SA.fitLineRobust(pts, 1);
+  ok(robust && robust.n < pts.length, "should have trimmed something");
+  ok(robust.line.rms < naive.rms/3,
+     "rms " + fmt(robust.line.rms) + " vs naive " + fmt(naive.rms));
+  ok(Math.abs(robust.line.dy) < 0.02, "line should stay horizontal");
+  return "kept " + robust.n + "/" + robust.of + ", rms " +
+         fmt(naive.rms) + " -> " + fmt(robust.line.rms);
+});
+
 /* ---------------------- quad refinement from a rect fit ------------------- */
 t("refineQuad recovers a keystoned quad from its boundary points", () => {
   const out=[];
