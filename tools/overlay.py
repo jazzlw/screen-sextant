@@ -2,16 +2,15 @@
 """Draw what the detector found on top of a photo, so a fit can be judged by
 eye instead of by number.
 
-    python3 tools/overlay.py photo.jpg [out.png]
+    python3 tools/overlay.py photo.jpg [out.png] [bias]
 
-The geometry comes from the real geom.js, run under the jsc that ships inside
-macOS, so what you see is what the app computes. Only the mask stage --
-downscale, luminance, Otsu, largest connected component -- is reimplemented
-here; it mirrors detect() in index.html.
+Runs SA.detectScreen from the real geom.js under the jsc that ships inside
+macOS, so what you see is what the app computes. bias 0 is the app's
+automatic search; anything else is the slider moved by hand.
 
-Yellow  the minimum-area rectangle fitted to the mask
-Cyan    after snapQuad refines each side onto the strongest edge
-Red     the mask itself, dimmed, so you can see what the threshold gave
+Yellow  every candidate the search kept, after snapping
+Cyan    the one it chose
+Red     the largest blob at the threshold, dimmed, for what the mask alone saw
 """
 import json, os, struct, subprocess, sys, tempfile, zlib
 
@@ -77,51 +76,6 @@ def write_png(path, w, h, rgb):
         + chunk(b'IEND', b''))
 
 
-# ------------------------------------------------------------ the mask stage --
-def mask_stage(w, h, gray, bias=0):
-    """Otsu + largest 4-connected component; mirrors detect() in index.html."""
-    hist = [0]*256
-    for v in gray: hist[v] += 1
-    n = w*h
-    total = sum(t*hist[t] for t in range(256))
-    sumB = wB = 0; best = 0.0; otsu = 128
-    for t in range(256):
-        wB += hist[t]
-        if not wB: continue
-        wF = n - wB
-        if not wF: break
-        sumB += t*hist[t]
-        v = wB*wF*((sumB/wB) - ((total-sumB)/wF))**2
-        if v > best: best, otsu = v, t
-    thr = max(4, min(251, otsu + bias))
-
-    lab = [-1]*n
-    best_id, best_area = -1, 0
-    cid = 0
-    for s in range(n):
-        if gray[s] <= thr or lab[s] != -1: continue
-        stack, area = [s], 0
-        lab[s] = cid
-        while stack:
-            p = stack.pop(); area += 1
-            px, py = p % w, p // w
-            for q, ok in ((p-1, px > 0), (p+1, px < w-1),
-                          (p-w, py > 0), (p+w, py < h-1)):
-                if ok and gray[q] > thr and lab[q] == -1:
-                    lab[q] = cid; stack.append(q)
-        if area > best_area: best_area, best_id = area, cid
-        cid += 1
-    pts = []
-    for i in range(n):
-        if lab[i] != best_id: continue
-        x, y = i % w, i // w
-        if (x == 0 or y == 0 or x == w-1 or y == h-1 or
-                lab[i-1] != best_id or lab[i+1] != best_id or
-                lab[i-w] != best_id or lab[i+w] != best_id):
-            pts.append([x+0.5, y+0.5])
-    return thr, otsu, lab, best_id, pts
-
-
 # ------------------------------------------------------------------ drawing --
 def draw_line(buf, w, h, a, b, colour, width=2):
     steps = int(max(abs(b[0]-a[0]), abs(b[1]-a[1]))*2) + 1
@@ -159,29 +113,32 @@ def main():
                     "png", "--out", small, src],
                    check=True, capture_output=True)
     w, h, nch, pix = read_png(small)
-    gray = bytearray(w*h)
+    gray, peak = bytearray(w*h), bytearray(w*h)
     for i in range(w*h):
         j = i*nch
-        gray[i] = (int(pix[j]*0.299 + pix[j+1]*0.587 + pix[j+2]*0.114)
-                   if nch >= 3 else pix[j])
+        if nch >= 3:
+            gray[i] = int(pix[j]*0.299 + pix[j+1]*0.587 + pix[j+2]*0.114)
+            peak[i] = max(pix[j], pix[j+1], pix[j+2])
+        else:
+            gray[i] = peak[i] = pix[j]
 
-    thr, otsu, lab, best_id, pts = mask_stage(w, h, gray, bias)
-    print(f"{w}x{h}  Otsu={otsu}  threshold={thr} (bias {bias:+d})  "
-          f"{len(pts)} boundary points")
-
-    json.dump({"w": w, "h": h, "g": list(gray)}, open(os.path.join(tmp, "g.json"), "w"))
-    json.dump(pts, open(os.path.join(tmp, "p.json"), "w"))
+    json.dump({"w": w, "h": h, "g": list(gray), "m": list(peak)},
+              open(os.path.join(tmp, "g.json"), "w"))
     driver = os.path.join(tmp, "drive.js")
+    # the same call detect() in index.html makes
     open(driver, "w").write(f"""
 var G = JSON.parse(read({json.dumps(os.path.join(tmp,'g.json'))}));
-var pts = JSON.parse(read({json.dumps(os.path.join(tmp,'p.json'))}));
-var r = SA.minAreaRect(pts);
-var out = {{rect: r ? SA.corners(r) : null, snap: null, rectInfo: null}};
-if (r) {{
-  out.rectInfo = {{w: r.w, h: r.h, roll: SA.deg(r.t)}};
-  out.snap = SA.snapQuad(G.g, G.w, G.h, r);
-}}
-print(JSON.stringify(out));
+var otsu = SA.otsu(G.g), bias = {bias};
+var thr = Math.max(4, Math.min(251, otsu + bias));
+var opts = bias === 0 ? {{also:[{{g:G.m, thr:SA.otsu(G.m)}}]}}
+                      : {{search:false, snap:{{passes:[0.3,0.12,0.05]}}}};
+opts.debug = true;
+var r = SA.detectScreen(G.g, G.w, G.h, thr, opts);
+var blob = SA.brightestBlob(G.g, G.w, G.h, thr), mask = [];
+if (blob) for (var i = 0; i < blob.lab.length; i++) if (blob.lab[i] === blob.id) mask.push(i);
+print(JSON.stringify({{otsu: otsu, thr: thr, mask: mask,
+  quad: r ? r.quad : null, source: r ? r.source : "none",
+  cands: r ? r.cands.map(function(c){{ return c.quad; }}) : []}}));
 """)
     res = subprocess.run([JSC, "-e", "globalThis.window=globalThis;",
                           os.path.join(ROOT, "geom.js"), driver],
@@ -189,6 +146,8 @@ print(JSON.stringify(out));
     if res.returncode != 0:
         print(res.stdout, res.stderr); sys.exit(1)
     got = json.loads(res.stdout.strip().splitlines()[-1])
+    print(f"{w}x{h}  Otsu={got['otsu']}  threshold={got['thr']} (bias {bias:+d})  "
+          f"{len(got['cands'])} candidates")
 
     W2, H2 = w*SCALE, h*SCALE
     buf = bytearray(W2*H2*3)
@@ -199,22 +158,20 @@ print(JSON.stringify(out));
             if nch >= 3: buf[j:j+3] = pix[k:k+3]
             else: buf[j] = buf[j+1] = buf[j+2] = pix[k]
     # tint the mask so the threshold's contribution is visible
-    for i in range(w*h):
-        if lab[i] != best_id: continue
+    for i in got["mask"]:
         sx, sy = i % w, i // w
         for oy in range(SCALE):
             for ox in range(SCALE):
                 j = ((sy*SCALE+oy)*W2 + sx*SCALE+ox)*3
                 buf[j] = min(255, buf[j] + 60)
 
-    if got["rect"]: draw_quad(buf, W2, H2, got["rect"], (255, 210, 40), 2)
-    if got["snap"]: draw_quad(buf, W2, H2, got["snap"], (60, 230, 240), 2)
+    for q in got["cands"]:
+        draw_quad(buf, W2, H2, q, (255, 210, 40), 1, 2)
+    if got["quad"]:
+        draw_quad(buf, W2, H2, got["quad"], (60, 230, 240), 2)
 
     write_png(out, W2, H2, buf)
-    ri = got.get("rectInfo")
-    if ri:
-        print(f"rect {ri['w']:.1f}x{ri['h']:.1f} roll {ri['roll']:.1f}deg   "
-              f"snapQuad {'accepted' if got['snap'] else 'declined'}")
+    print(f"fit: {got['source']}")
     print(f"wrote {out}  ({W2}x{H2})")
 
 

@@ -132,25 +132,25 @@ with resolution, so both belong in the key.
 
 ## Detection
 
-1. Downscale to 520 px on the long side.
-2. Convert to luminance (Rec. 601 weights).
-3. Otsu threshold on the 256-bin histogram, plus a user bias slider.
-4. Iterative flood fill (4-connected) over the above-threshold mask; keep the
-   largest component.
-5. Collect that component's boundary pixels and fit a **minimum-area rectangle**
-   by rotating calipers over their convex hull. This is only a starting guess.
-6. Refine that rectangle into a **quadrilateral**: assign each boundary point to
-   its nearest side, fit a total-least-squares line per side, intersect adjacent
-   pairs. A keystoned screen still has straight edges — only the rectangle
-   assumption fails, not the straightness one. Declines and keeps the rectangle
-   whenever the result isn't clearly better.
-7. **Snap each side onto the strongest edge in the image**, which is what
-   actually locates the screen — see below. Falls back to step 6, then to the
-   rectangle, if no convincing edge is there.
-8. Scale back to native resolution.
+1. Downscale to 520 px on the long side, into two buffers: luminance (Rec. 601)
+   and the brightest of R, G, B.
+2. **Propose candidates.** For each buffer, label every 4-connected component
+   at five thresholds around Otsu's (×0.35 to ×1.3), and keep the six largest
+   at each. Fit each one's boundary with a **minimum-area rectangle** by
+   rotating calipers. Drop any that touch the frame.
+3. **Score each candidate by edge support**: walk its outline and count where
+   the inside is brighter than the outside, right at the line. The five
+   best-scoring candidates, weighted toward larger ones, go on.
+4. **Snap each candidate's sides onto the real edge** — see below. Keep the
+   snap unless it fits clearly worse than the rectangle it started from.
+5. Pick the best candidate, again by edge support and size.
+6. Scale back to native resolution.
 
-In a dark auditorium the lit rectangle separates cleanly and this lands first
-try. Four corner handles and four edge-midpoint handles for when it doesn't.
+Moving the threshold slider off *auto* switches to a manual override: one
+threshold, the largest blob at it, snapped with a longer reach.
+
+In a dark auditorium this lands first try. Four corner handles and four
+edge-midpoint handles for when it doesn't.
 
 ### Why a rotated rectangle
 
@@ -252,55 +252,104 @@ about 2% of the truth.
 The mask can only ever find the *lit* region. The screen's edge is a luminance
 discontinuity, though, and that survives whatever is being shown — on the photo
 above the step at one edge was 150 → 59 across two pixels, in a region the mask
-had already given up on. So `snapQuad` walks perpendicular to each side of the
+had already given up on. So snapping walks perpendicular to each side of the
 initial rectangle and fits a line to where the step actually is.
 
-Two things about it are not obvious, and both were found by measurement rather
-than reasoning:
+The first version, `snapQuad`, took the luminance step of either sign that was outermost
+among those most samples agreed on. Ten real photos showed both choices
+failing. Text on a title card is a step, and so is the top of a lit row of
+seats, and "outermost" walked onto either. `snapEdges` replaced it, and three
+things about it matter.
 
-**Take the outermost significant step, not the strongest.** Where the picture
-is dark at an edge, the biggest step along that normal is lit-picture to
-dark-picture, sitting well *inside* the screen. The boundary is the smaller
-step from dark picture to wall.
+**Polarity.** Whatever surrounds a screen — masking, a bezel, a darker wall —
+is darker than the picture right at the edge, on every side. Picture content
+and furniture don't do that consistently. So only steps going *down* outward
+count. This rejects the seats outright: they are brighter outside than in.
 
-**But outermost alone fails too.** On the same photo's top edge, "outermost"
-found a bookshelf 30 px beyond the screen for the left third of the side. What
-separates the screen's edge from both impostors is that it runs the *whole
-length* of the side — so every significant step is collected as a candidate,
-and the chosen line is the outermost one that most samples agree on. That is a
-small consensus search over a narrow fan of slopes, the seed side having
-already fixed the angle to within a few degrees.
+**Best supported, then outermost.** Each side tries every line in a narrow fan
+of slopes and offsets. It counts the samples with an inside-brighter step
+within a pixel of the line, and takes the outermost line within 90% of the
+best count. The outermost rule is still needed: a film inset in a lit grey
+frame has two full-length edges, and the screen is the outer one.
 
-It runs three passes with shrinking search radii. That is not an optimisation:
-one pass must pick a single radius, and it needs a large one to reach an edge
-the mask fell 30 px short of, but a small one to avoid latching onto the
-furniture. Successive passes get the reach of the first and the precision of
-the last.
+**Curved screens.** Cinema screens are often curved, so their top and bottom
+edges image as arcs. A straight line through an arc misses the corners by a
+good part of the sag. On the photos below that was 12–15 px, the largest error
+left. Each side may therefore take a parabola instead of a line. It is
+accepted only if it puts at least as many samples on an edge as the line does,
+and if its sag is under 6% of the side. Otherwise a quadratic happily chases a
+patch of picture content along a third of the side. Corners are where adjacent
+curves meet.
 
-Measured against edges read directly off the photo:
+It runs three passes with shrinking reach (25%, 10% and 4% of the shortest
+side, capped at 40 px). One pass would need a long reach to get to an edge the
+mask fell short of, and a short one to stay off the furniture. Shrinking passes
+get both. A side with no convincing edge keeps its seed position rather than
+sinking the other three.
 
-| | worst corner error | aspect | obliquity |
-|---|---|---|---|
-| minimum-area rectangle | 32.0 px | 0.601 | 5.1° |
-| after snapping | **9.6 px** | 0.421 | 32.7° |
+### Choosing between candidates
 
-Three of the four corners land within 2.3 px. And the snapped quad is
-**identical at every threshold**, which the mask fit is not — the slider stops
-mattering, because the answer no longer comes from the mask.
+One threshold and the largest blob is the right model for a dark auditorium
+and the wrong one almost everywhere else. In a lit room the largest bright
+thing is the wall. In a cinema a dark passage of picture splits the screen
+into pieces. So the detector proposes many candidates and lets edge support
+choose.
 
-Roughly 16 ms at the 520 px working size, so it re-runs live under the
-threshold slider.
+Two details came from measurement:
+
+- **A loose band to recognise, a tight one to refine.** The edge score looks
+  for a step within 3.5% of the side length of the line. That tolerates a
+  rough seed and a curved screen, but it also lets a rectangle 30 px off score
+  as well as an exact fit. Seed and snap are therefore compared on a 1.5% band
+  instead.
+- **Larger wins ties.** A screen whose picture is bright on the left and dark
+  on the right has a bright left half that is also a well-edged rectangle.
+  Each candidate's rank is its score times (area fraction)^0.4.
+
+Luma weights blue at 0.114, so a TV showing a saturated blue news set can be
+darker than the wall it hangs on. Proposing from max(R, G, B) as well fixes
+that without making luma worse where it already worked.
+
+### Measured on ten photos
+
+`tools/eval.py` runs the detector on photos in `example_images/` (not in the
+repo) against corners marked by hand in `example_images/truth.json`. Error is
+the worst corner's distance from its mark, at the 520 px working size:
+
+| | first version | now |
+|---|---|---|
+| within 2% of the diagonal | 1 / 10 | 6 / 10 |
+| median worst corner | 21.5% | 0.7% |
+
+The four that miss, and why:
+
+| photo | worst corner | cause |
+|---|---|---|
+| curved screen, head over the bottom | 5.9% | the bottom edge is partly hidden, and picture content wins it |
+| living-room TV | 6.4% | a stack of books hides the bottom-right corner |
+| curved screen, dim blue overscan | 2.8% | arguably a marking question: lit surface beyond the picture |
+| bar TV, dark picture, lit room | 139% | only the bright half of the picture is ever proposed |
+
+When marking, the screen is the outer lit rectangle, not a picture inset
+inside it. Corners that are hidden are estimated by extending the edges and
+marked unsure, so they aren't scored.
+
+About 40–120 ms per photo under `jsc`, run once per image. The manual slider
+path proposes from a single threshold and stays fast enough to drag.
 
 ### Looking at a fit
 
 ```
 python3 tools/overlay.py photo.jpg out.png [bias]
+python3 tools/eval.py [--sheet out.png] [--only NAME]
 ```
 
-Draws the mask, the rectangle (yellow) and the snapped quad (cyan) over the
-photo. The geometry comes from the real `geom.js` run under `jsc`, so what you
-see is what the app computes. Judging a fit by eye catches things no assertion
-was written for.
+`overlay.py` draws the largest blob's mask (red), every candidate the search
+kept (yellow) and the chosen one (cyan). `eval.py` scores the marked photos,
+and `--sheet` draws them all into one contact sheet, marked in magenta and
+detected in cyan. Both run the real `detectScreen` from `geom.js` under `jsc`,
+so what you see is what the app computes. Judging a fit by eye catches things
+no assertion was written for.
 
 **It detects the projected image, not the physical screen.** With masking closed
 on a scope feature you'll read 2.39:1 — which is the honest answer for what
@@ -314,18 +363,20 @@ check: if it says 1.85 and you're watching a Villeneuve film, the box is wrong.
 Four files, no build step, no dependencies.
 
 ```
-geom.js      pure geometry -- pinhole model, rotated rect, convex hull,
-             rotating calipers, single-view rectification. No DOM, no
-             state, fully tested.
+geom.js      pure geometry and detection -- pinhole model, rotated rect,
+             convex hull, rotating calipers, single-view rectification,
+             candidate search, edge snapping. No DOM, no state, fully
+             tested.
 exif.js      JPEG APP1 -> TIFF -> IFD0 -> Exif sub-IFD, plus the
              diagnostics probe.html renders. Pure, fully tested.
 lenses.js    nominal focal lengths by lens type, each with a tolerance.
              Data, not measurement -- see Focal-length precedence.
-index.html   design tokens, markup, and one IIFE of glue: detection,
+index.html   design tokens, markup, and one IIFE of glue: the downscale,
              canvas rendering, handle editing, the calibration store.
 probe.html   diagnostics: dumps every tag a file carries, and which
              file-input configuration produced it.
 sw.js        cache-first precache so it launches in a dead zone.
+tools/       overlay.py and eval.py, for judging detection on real photos.
 ```
 
 Classic scripts rather than ES modules, because modules over `file://` hit CORS
@@ -586,6 +637,10 @@ To regenerate icons after editing the glyph: `python3 tools/make-icons.py`.
 - Optical centre assumed at the image centre. True to well under a pixel of
   consequence on phones, but an assumption rather than a measurement.
 - `skew` is blind to focal-length error under pure yaw (see Keystone above).
+- Detection needs the screen to be lit at its edges. A TV showing a dark
+  picture in a lit room is proposed only as its bright part, and a side
+  mostly hidden by heads or furniture can be lost to picture content. Drag
+  the corners.
 
 ---
 
@@ -598,12 +653,11 @@ To regenerate icons after editing the glyph: `python3 tools/make-icons.py`.
       spec requires. iOS does; a vendor that doesn't would reintroduce the
       error the budget used to claim, and nothing in a single file
       distinguishes the two cases.
-- [ ] Move Otsu and the connected-component pass into `geom.js`. They are pure
-      functions over a luminance buffer, but they live in `index.html`, so
-      `tools/overlay.py` reimplements them and the two can drift.
-- [ ] Collect a few more photos with a measured reference and turn them into a
-      regression set. One photo drove every tuning decision in `snapQuad`,
-      which is one photo too few.
+- [ ] More marked photos. Ten drove the current tuning: better than one, but
+      every parameter has been fitted to them, so the 6/10 is optimistic
+      until it is measured on photos it has not seen.
+- [ ] Propose candidates from edges, not only from bright blobs, so a screen
+      whose picture is dark at a whole side (the bar TV) is ever considered.
 
 ---
 

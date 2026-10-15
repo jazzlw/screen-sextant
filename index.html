@@ -336,7 +336,7 @@ function calWrite(o){
    slider event meant re-downscaling a 12 MP photo on every pointer move, which
    is most of the cost and none of the point. Computed once per image instead,
    so dragging the threshold only re-runs the flood fill. */
-let gray=null, gw=0, gh=0, gscale=1, otsuThr=128;
+let gray=null, peak=null, gw=0, gh=0, gscale=1, otsuThr=128, peakThr=128;
 
 function prepare(){
   const MAX=520;
@@ -347,24 +347,15 @@ function prepare(){
   tc.drawImage(off,0,0,w,h);
   const d=tc.getImageData(0,0,w,h).data;
 
-  const g=new Uint8Array(w*h), hist=new Uint32Array(256);
+  /* Two buffers: luma, and the brightest of R,G,B. Luma all but ignores
+     saturated blue, so a TV showing a news channel can be darker than the
+     wall it hangs on; the detector proposes from both. */
+  const g=new Uint8Array(w*h), m=new Uint8Array(w*h);
   for(let i=0,j=0;i<g.length;i++,j+=4){
-    const v=(d[j]*0.299+d[j+1]*0.587+d[j+2]*0.114)|0;
-    g[i]=v; hist[v]++;
+    g[i]=(d[j]*0.299+d[j+1]*0.587+d[j+2]*0.114)|0;
+    m[i]=Math.max(d[j],d[j+1],d[j+2]);
   }
-  // Otsu
-  const N=w*h; let sum=0;
-  for(let t=0;t<256;t++) sum+=t*hist[t];
-  let sumB=0,wB=0,best=0,thr=128;
-  for(let t=0;t<256;t++){
-    wB+=hist[t]; if(!wB) continue;
-    const wF=N-wB; if(!wF) break;
-    sumB+=t*hist[t];
-    const mB=sumB/wB, mF=(sum-sumB)/wF;
-    const v=wB*wF*(mB-mF)*(mB-mF);
-    if(v>best){best=v;thr=t;}
-  }
-  gray=g; gw=w; gh=h; gscale=s; otsuThr=thr;
+  gray=g; peak=m; gw=w; gh=h; gscale=s; otsuThr=SA.otsu(g); peakThr=SA.otsu(m);
 }
 
 function detect(bias){
@@ -374,58 +365,17 @@ function detect(bias){
   const tv=$("thrVal");
   if(tv) tv.textContent=thr+(bias?" ("+(bias>0?"+":"")+bias+")":" auto");
 
-  // largest 4-connected component above threshold
-  const lab=new Int32Array(w*h).fill(-1);
-  const stack=new Int32Array(w*h);
-  let bestArea=0,bestId=-1,id=0;
-  for(let i=0;i<g.length;i++){
-    if(g[i]<=thr||lab[i]!==-1) continue;
-    let sp=0; stack[sp++]=i; lab[i]=id;
-    let area=0;
-    while(sp){
-      const p=stack[--sp], px=p%w, py=(p/w)|0;
-      area++;
-      if(px>0   && g[p-1]>thr && lab[p-1]===-1){lab[p-1]=id;stack[sp++]=p-1;}
-      if(px<w-1 && g[p+1]>thr && lab[p+1]===-1){lab[p+1]=id;stack[sp++]=p+1;}
-      if(py>0   && g[p-w]>thr && lab[p-w]===-1){lab[p-w]=id;stack[sp++]=p-w;}
-      if(py<h-1 && g[p+w]>thr && lab[p+w]===-1){lab[p+w]=id;stack[sp++]=p+w;}
-    }
-    if(area>bestArea){bestArea=area;bestId=id;}
-    id++;
-  }
-  if(bestId<0 || bestArea<40){ quad=defaultQuad(); fitSource="default"; return; }
-
-  /* Fit a rotated rectangle rather than take a bounding box. Only the
-     component's boundary is needed -- the hull of the boundary is the hull of
-     the whole blob -- which keeps the point set in the low thousands. */
-  const pts=[];
-  for(let i=0;i<lab.length;i++){
-    if(lab[i]!==bestId) continue;
-    const x=i%w, y=(i/w)|0;
-    if(x===0 || y===0 || x===w-1 || y===h-1 ||
-       lab[i-1]!==bestId || lab[i+1]!==bestId ||
-       lab[i-w]!==bestId || lab[i+w]!==bestId) pts.push([x+0.5, y+0.5]);
-  }
-  const fit=SA.minAreaRect(pts);
-  if(!fit){ quad=defaultQuad(); return; }
-
-  /* The rect is only the initialisation. A screen shot from off the centreline
-     is a trapezoid, not a rectangle, so refine each side by fitting a line to
-     the boundary points along it. refineQuad returns null when the result is
-     not clearly better, in which case the rect stands. */
-  // points are pixel centers, so the fitted extent is one pixel short
-  const grown = {cx:fit.cx, cy:fit.cy, w:fit.w+1, h:fit.h+1, t:fit.t};
-
-  /* Snap each side onto the strongest edge in the image, falling back to the
-     mask-derived refinement and then to the rectangle itself. Snapping works
-     from luminance rather than from the threshold mask, so it recovers edges
-     the mask never had -- and it gives the same answer at every threshold,
-     which the mask fit does not. */
-  const snapped = SA.snapQuad(g, w, h, grown);
-  const refined = snapped || SA.refineQuad(pts, fit);
-  fitSource = snapped ? "snapped" : (refined ? "edge-fit" : "rectangle");
-  const small = refined || SA.corners(grown);
-  quad = small.map(pt => [pt[0]/s, pt[1]/s]);
+  /* At the automatic threshold, search: candidates from several thresholds
+     and both buffers, chosen by edge evidence. Once the slider has moved, the
+     user is overriding a wrong pick, so take their threshold literally -- and
+     since a hand-set threshold can cut well inside a dark edge, let the snap
+     reach further from it than the search needs to. */
+  const r=SA.detectScreen(g, w, h, thr, bias===0
+    ? {also:[{g:peak, thr:peakThr}]}
+    : {search:false, snap:{passes:[0.3,0.12,0.05]}});
+  if(!r){ quad=defaultQuad(); fitSource="default"; return; }
+  fitSource=r.source;
+  quad=r.quad.map(pt => [pt[0]/s, pt[1]/s]);
 }
 function defaultQuad(){
   return SA.corners({cx:W/2, cy:H/2, w:W*0.6, h:H*0.4, t:0});

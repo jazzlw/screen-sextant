@@ -384,7 +384,7 @@ function worstCorner(a,b){
   return m;
 }
 
-t("snapQuad recovers a screen from a deliberately wrong starting rectangle", () => {
+t("snapEdges recovers a screen from a deliberately wrong starting rectangle", () => {
   const W2=400, H2=300;
   const quad=[[110,70],[290,70],[290,220],[110,220]];
   const g = renderScene(W2,H2,quad,{noise:1});
@@ -392,7 +392,7 @@ t("snapQuad recovers a screen from a deliberately wrong starting rectangle", () 
   // start from rects that are too small, too large, and offset
   for(const [dw,dh,dx,dy] of [[-16,-16,0,0],[14,14,0,0],[-10,8,6,-5],[0,0,0,0]]){
     const start={cx:200+dx, cy:145+dy, w:180+dw, h:150+dh, t:0};
-    const got = SA.snapQuad(g,W2,H2,start);
+    const got = SA.snapEdges(g,W2,H2,start);
     ok(got, "declined for start " + JSON.stringify([dw,dh,dx,dy]));
     const err = worstCorner(got, quad);
     ok(err < 1.5, "corner error " + fmt(err) + "px for start " + [dw,dh,dx,dy]);
@@ -401,7 +401,7 @@ t("snapQuad recovers a screen from a deliberately wrong starting rectangle", () 
   return "worst corner error: " + out.join(", ") + " px";
 });
 
-t("snapQuad finds an edge the threshold mask cannot", () => {
+t("snapEdges finds an edge the threshold mask cannot", () => {
   /* The measured failure: the picture is dark right at one edge, so the lit
      region stops short of the screen. The step from dark picture to lit wall
      is still there, which is what snapping uses. */
@@ -414,39 +414,148 @@ t("snapQuad finds an edge the threshold mask cannot", () => {
   const naive = SA.corners(litOnly);
   ok(worstCorner(naive, quad) > 25, "setup: the mask-derived rect should be short");
 
-  const got = SA.snapQuad(g,W2,H2,litOnly);
-  ok(got, "snapQuad declined on the case it exists for");
+  /* The band is 22% of the height, beyond the default first pass. The app
+     only meets a mask cut this short when the threshold has been set by
+     hand -- the automatic search proposes from lower thresholds that keep
+     the band -- and that path snaps with this longer reach. */
+  const got = SA.snapEdges(g,W2,H2,litOnly,{passes:[0.3,0.12,0.05]});
+  ok(got, "snapEdges declined on the case it exists for");
   const err = worstCorner(got, quad);
   ok(err < 2, "corner error " + fmt(err) + "px");
   return "mask short by " + fmt(worstCorner(naive,quad)) + "px, snapped to " + fmt(err) + "px";
 });
 
-t("snapQuad handles a rolled screen", () => {
+t("snapEdges handles a rolled screen", () => {
   const W2=460, H2=360;
   const r = {cx:230, cy:180, w:200, h:150, t:7*Math.PI/180};
   const quad = SA.corners(r);
   const g = renderScene(W2,H2,quad,{noise:1});
   const start = {cx:232, cy:177, w:186, h:140, t:5*Math.PI/180};
-  const got = SA.snapQuad(g,W2,H2,start);
+  const got = SA.snapEdges(g,W2,H2,start);
   ok(got, "declined on a rolled screen");
   const err = worstCorner(got, quad);
   ok(err < 2, "corner error " + fmt(err) + "px");
   return fmt(err) + "px on a 7-degree roll started from 5";
 });
 
-t("snapQuad declines when there is no edge to find", () => {
+t("snapEdges declines when there is no edge to find", () => {
   const W2=300, H2=200;
   const flat = new Float64Array(W2*H2).fill(120);
-  ok(SA.snapQuad(flat,W2,H2,{cx:150,cy:100,w:120,h:90,t:0}) === null, "uniform image");
+  ok(SA.snapEdges(flat,W2,H2,{cx:150,cy:100,w:120,h:90,t:0}) === null, "uniform image");
 
   const noise = new Float64Array(W2*H2);
   for(let i=0;i<noise.length;i++) noise[i] = (i*2654435761 % 255);
-  const got = SA.snapQuad(noise,W2,H2,{cx:150,cy:100,w:120,h:90,t:0});
+  const got = SA.snapEdges(noise,W2,H2,{cx:150,cy:100,w:120,h:90,t:0});
   ok(got === null || SA.isConvexQuad(got), "noise produced a non-convex quad");
 
-  ok(SA.snapQuad(null,W2,H2,{cx:150,cy:100,w:120,h:90,t:0}) === null, "no buffer");
-  ok(SA.snapQuad(flat,W2,H2,{cx:150,cy:100,w:2,h:2,t:0}) === null, "degenerate rect");
+  ok(SA.snapEdges(null,W2,H2,{cx:150,cy:100,w:120,h:90,t:0}) === null, "no buffer");
+  ok(SA.snapEdges(flat,W2,H2,{cx:150,cy:100,w:2,h:2,t:0}) === null, "degenerate rect");
   return "no edge, no quad";
+});
+
+/* Paint a scene from a per-pixel function, into the 8-bit buffer the app
+   hands the detector. */
+function paint(w,h,fn){
+  const g = new Uint8Array(w*h);
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++)
+    g[y*w+x] = Math.max(0, Math.min(255, Math.round(fn(x,y))));
+  return g;
+}
+const inRect = (x,y,x0,y0,x1,y1) => x >= x0 && x < x1 && y >= y0 && y < y1;
+
+t("snapEdges takes the screen, not the picture inset inside it", () => {
+  /* Measured on a small cinema: the film sat inside a lit grey frame, so the
+     image has two full-length inside-brighter edges per side. The screen is
+     the outer one. */
+  const W2=400, H2=300;
+  const g = paint(W2,H2,(x,y) =>
+    inRect(x,y,120,95,280,195) ? 200 :             // picture
+    inRect(x,y,100,80,300,210) ? 120 : 30);         // lit frame, then wall
+  const got = SA.snapEdges(g,W2,H2,{cx:200,cy:145,w:170,h:108,t:0});
+  ok(got, "declined");
+  const err = worstCorner(got, [[100,80],[300,80],[300,210],[100,210]]);
+  ok(err < 1.5, "corner error " + fmt(err) + "px");
+  return "outer frame to " + fmt(err) + "px";
+});
+
+t("snapEdges ignores a bright edge beyond the screen that steps the wrong way", () => {
+  /* The seats below a cinema screen: dark wall under the screen, then a lit
+     row of seat backs. Their top edge is a strong step, but it is brighter
+     *outside* than in, which a screen edge never is. Their lower outline is
+     broken up by the seats themselves, as in a real auditorium; a uniform
+     band with a straight lower edge would be indistinguishable from a
+     screen's edge, and the outermost one would win. */
+  const W2=400, H2=300;
+  const ragged = x => {                                    // per seat back
+    const k = Math.floor(x/14);
+    return 226 + ((k*k*7 + k*13 + 5) % 23);
+  };
+  const g = paint(W2,H2,(x,y) =>
+    inRect(x,y,100,60,300,190) ? 170 :
+    (x >= 60 && x < 340 && y >= 215 && y < ragged(x)) ? 230 : 15);
+  const got = SA.snapEdges(g,W2,H2,{cx:200,cy:132,w:190,h:150,t:0});
+  ok(got, "declined");
+  const err = worstCorner(got, [[100,60],[300,60],[300,190],[100,190]]);
+  ok(err < 1.5, "corner error " + fmt(err) + "px");
+  return fmt(err) + "px, seats 25px below left alone";
+});
+
+t("snapEdges follows a curved screen's bowed edges to its corners", () => {
+  /* A curved cinema screen photographed from below its centre: top and bottom
+     edges are arcs. Straight lines fitted through them miss the corners by a
+     good fraction of the sag; the corners are where the arcs meet. */
+  const W2=480, H2=320;
+  const x0=60, x1=420, sag=12;
+  const bow = x => sag*(1 - Math.pow((x-(x0+x1)/2)/((x1-x0)/2), 2));
+  const top = x => 70 + bow(x), bot = x => 250 - 0.4*bow(x);
+  const g = paint(W2,H2,(x,y) => (x >= x0 && x < x1 && y >= top(x) && y < bot(x)) ? 180 : 12);
+  const truth = [[x0,top(x0)],[x1,top(x1)],[x1,bot(x1)],[x0,bot(x0)]];
+  const got = SA.snapEdges(g,W2,H2,{cx:240,cy:162,w:350,h:165,t:0});
+  ok(got, "declined");
+  const err = worstCorner(got, truth);
+  ok(err < 2.5, "corner error " + fmt(err) + "px");
+  return fmt(err) + "px with a " + sag + "px sag";
+});
+
+t("edgeSupport tells a screen from an outline drawn through its picture", () => {
+  const W2=400, H2=300;
+  const g = paint(W2,H2,(x,y) =>
+    !inRect(x,y,100,80,300,210) ? 20 : (x < 200 ? 210 : 90));
+  const screen = SA.edgeSupport(g,W2,H2,[[100,80],[300,80],[300,210],[100,210]]);
+  const half   = SA.edgeSupport(g,W2,H2,[[100,80],[200,80],[200,210],[100,210]]);
+  const inner  = SA.edgeSupport(g,W2,H2,[[130,110],[270,110],[270,180],[130,180]]);
+  ok(screen.score > 0.95, "screen scored " + fmt(screen.score));
+  ok(inner.score < 0.1, "an outline inside the picture scored " + fmt(inner.score));
+  ok(half.sides[1] > 0.9, "setup: bright-to-dark picture content is a real step");
+  return "screen " + fmt(screen.score) + ", inner outline " + fmt(inner.score) +
+         ", bright half " + fmt(half.score);
+});
+
+t("detectScreen finds a screen whose picture is dark on one side", () => {
+  /* The largest bright blob is only the lit half; the answer is the whole
+     screen, which lower thresholds propose and edge support prefers. */
+  const W2=520, H2=390;
+  const g = paint(W2,H2,(x,y) =>
+    !inRect(x,y,60,90,460,260) ? 6 : (x < 250 ? 200 : 34));
+  const r = SA.detectScreen(g,W2,H2,SA.otsu(g));
+  ok(r, "nothing found");
+  const err = worstCorner(r.quad, [[60,90],[460,90],[460,260],[60,260]]);
+  ok(err < 2, "corner error " + fmt(err) + "px");
+  return fmt(err) + "px, otsu " + SA.otsu(g);
+});
+
+t("detectScreen picks a TV in a lit room over the wall around it", () => {
+  /* The wall is the biggest bright thing and touches every edge of the
+     frame; the TV is darker than the wall but sits in a black bezel. */
+  const W2=520, H2=390;
+  const g = paint(W2,H2,(x,y) =>
+    inRect(x,y,190,140,350,230) ? 110 :
+    inRect(x,y,184,134,356,236) ? 8 : 190 - y*0.1);
+  const r = SA.detectScreen(g,W2,H2,SA.otsu(g));
+  ok(r, "nothing found");
+  const err = worstCorner(r.quad, [[190,140],[350,140],[350,230],[190,230]]);
+  ok(err < 2, "corner error " + fmt(err) + "px");
+  return fmt(err) + "px";
 });
 
 t("sampleAt interpolates and refuses to read outside the image", () => {
