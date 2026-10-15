@@ -579,10 +579,9 @@ To regenerate icons after editing the glyph: `python3 tools/make-icons.py`.
 
 - EXIF parser is JPEG-only. HEIC still *displays* (WebKit delegates to the
   system HEVC decoder) but its metadata lives in an ISOBMFF box structure this
-  doesn't parse, so the focal length must be entered by hand. Falls back to
-  26 mm — typical iPhone main camera — flagged yellow.
+  doesn't parse, so no reading is given until a focal length is supplied —
+  typed in, picked from a lens preset, or a saved calibration.
 - No lens-distortion model. Fine for the main camera, degrades on ultrawide.
-- Assumes optical center at image center. True enough for phones.
 - Single frame only. No averaging across a burst.
 - Optical centre assumed at the image centre. True to well under a pixel of
   consequence on phones, but an assumption rather than a measurement.
